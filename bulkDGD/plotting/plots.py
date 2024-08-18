@@ -631,8 +631,6 @@ def plot_multiple_2d_dim_red(dfs_dim_red,
         passed, will be used as the titles of the corresponding plots.
     """
 
-    #-----------------------------------------------------------------#
-
     # Get the sections that need to be in the configuration.
     sections_needed = ["output"]
 
@@ -813,7 +811,7 @@ def plot_multiple_2d_dim_red(dfs_dim_red,
             
         # For each data frame
         for df_dim_red, ax in \
-            zip(dfs_chunk, axes.flat[len(dfs_chunk)]):
+            zip(dfs_chunk, axes.flat[:len(dfs_chunk)]):
 
             # If the user provided the names of the data frames
             if dfs_names is not None:
