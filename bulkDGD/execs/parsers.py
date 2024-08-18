@@ -42,6 +42,7 @@ from . import (
     bulkdgd_find,
     bulkdgd_find_probability_density,
     bulkdgd_find_representations,
+    bulkdgd_find_residuals,
     bulkdgd_dea,
     bulkdgd_preprocess,
     bulkdgd_preprocess_samples,
@@ -96,7 +97,14 @@ COMMANDS = \
                  "module" : bulkdgd_find_probability_density,
                  # Set the 'main' function corresponding to the
                  # command.
-                 "main" : bulkdgd_find_probability_density.main}}},
+                 "main" : bulkdgd_find_probability_density.main},
+             # Set the 'find residuals' command.
+             "residuals" : \
+                {# Set the module corresponding to the command.
+                 "module" : bulkdgd_find_residuals,
+                 # Set the 'main' function corresponding to the
+                 # command.
+                 "main" : bulkdgd_find_residuals.main}}},
 
      # Set the options for the 'preprocess' command.
      "preprocess": \
