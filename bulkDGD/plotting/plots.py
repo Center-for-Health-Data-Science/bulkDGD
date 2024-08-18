@@ -812,7 +812,8 @@ def plot_multiple_2d_dim_red(dfs_dim_red,
         #-------------------------------------------------------------#
             
         # For each data frame
-        for df_dim_red, ax in zip(dfs_chunk, axes.flat):
+        for df_dim_red, ax in \
+            zip(dfs_chunk, axes.flat[len(dfs_chunk)]):
 
             # If the user provided the names of the data frames
             if dfs_names is not None:
@@ -1060,6 +1061,13 @@ def plot_residuals_hist(df_res,
 
     #-----------------------------------------------------------------#
 
+    # Take only the columns of interest.
+    df_res = \
+        df_res[\
+            [col for col in df_res.columns if col.startswith("ENSG")]]
+
+    #-----------------------------------------------------------------#
+
     # Substitute infinite values with NaNs.
     df_res = df_res.replace([np.inf, -np.inf], np.nan)
 
@@ -1095,8 +1103,8 @@ def plot_residuals_hist(df_res,
     #-----------------------------------------------------------------#
 
     # Generate the histogram.
-    n, bins, patches = ax.hist(x = residuals,
-                               **config_hist)
+    n, _, patches = ax.hist(x = residuals,
+                            **config_hist)
 
     #-----------------------------------------------------------------#
 
@@ -1134,7 +1142,7 @@ def plot_residuals_hist(df_res,
 
     # Set the y-axis.
     ax = _util.set_axis(ax = ax,
-                        axis = "x",
+                        axis = "y",
                         config = config_y_axis,
                         ticks = y_ticks)
 
@@ -1241,317 +1249,258 @@ def plot_multiple_residuals_hist(dfs_res,
         data frames).
     """
 
-
-    #--------------------- Get the configuration ---------------------#
-
-
-    # Get the configuration for the figure
+    # Get the configuration for the figure.
     config_fig = config["plot"].get("figure", {})
 
-    # If a configuration was passed
-    if config_fig:
-
-        # Inform the user that the custom configuration will be
-        # used
-        infostr = \
-            "A custom configuration will be used for " \
-            "the figure."
-        logger.info(infostr)
-
-    # Get the configuration for each histogram
+    # Get the configuration for each histogram.
     config_hist = config["plot"]["histogram"]
 
-    # Get the configuration for the title
+    # Get the configuration for the title.
     config_title = config["plot"].get("title", {})
 
-    # If a configuration was passed
-    if config_title:
-
-        # Inform the user that the custom configuration will be
-        # used
-        infostr = \
-            "A custom configuration will be used for " \
-            "the plots' titles."
-        logger.info(infostr)
-
-    # Get the configuration for each x-axis
+    # Get the configuration for each x-axis.
     config_x_axis = config["plot"].get("xaxis", {})
 
-    # If a configuration was passed
-    if config_x_axis:
-
-        # Inform the user that the custom configuration will be
-        # used
-        infostr = \
-            "A custom configuration will be used for " \
-            "the plots' x-axes."
-        logger.info(infostr)
-
-    # Get the configuration for each y-axis
+    # Get the configuration for each y-axis.
     config_y_axis = config["plot"].get("yaxis", {})
 
-    # If a configuration was passed
-    if config_y_axis:
-
-        # Inform the user that the custom configuration will be
-        # used
-        infostr = \
-            "A custom configuration will be used for " \
-            "the plots' y-axes."
-        logger.info(infostr)
-
-    # Get the configuration for the vertical lines to be drawn
+    # Get the configuration for the vertical lines to be drawn.
     config_vline = config["plot"].get("vline", {})
 
-    # If a configuration was passed
-    if config_vline:
-
-        # Inform the user that the custom configuration will be
-        # used
-        infostr = \
-            "A vertical line will be drawn on each plot to " \
-            f"mark point {config_vline['x']} on the x-axis."
-        logger.info(infostr)
-
-    # Get the configuration for the colorbars
+    # Get the configuration for the colorbars.
     config_cbar = config["plot"].get("colorbar", {})
 
-    # If a configuration was passed
-    if config_cbar:
-
-        # Inform the user that the plots will be colored
-        # according to the bins' heights
-        infostr = \
-            "The histogram bins will be colored according " \
-            "to their height."
-        logger.info(infostr)
-
-
-    #----------------------------- Plot ------------------------------#
-
+    #-----------------------------------------------------------------#
 
     # Split the list of data frames into equally-sized chunks
-    # with 'plots_per_output' data frames per chunk
+    # with 'plots_per_output' data frames per chunk.
     dfs_chunks = \
         [dfs_res[i:i + plots_per_output] \
          for i in range(0, len(dfs_res), plots_per_output)]
 
-    # Inform the user about how many output files will be written
+    # Inform the user about how many output files will be written.
     infostr = f"{len(dfs_chunks)} output files will be generated."
     logger.info(infostr)
+
+    # All the chunks will have the same number of plots.
+    num_plots = max([len(chunk) for chunk in dfs_chunks])
+
+    #-----------------------------------------------------------------#
 
     # For each chunk and associated output number
     for num_output, dfs_chunk in enumerate(dfs_chunks):
 
-        # Get the number of plots that will be in the current
-        # output file from the number of data frames in the chunk
-        num_plots = len(dfs_chunk)
-
         # Get the best layout (the rectangle with the smallest
         # different between dimensions) for the sub-plots from
-        # the number of data frames passed
+        # the number of data frames passed.
         nrows, ncols = \
-            _util._find_rectangular_grid(n = num_plots)
+            _util.find_rectangular_grid(n = num_plots)
 
-        # Generate the figure and subplots
+        # Generate the figure and subplots.
         fig, axes = \
             plt.subplots(\
                 nrows = nrows,
                 ncols = ncols,
                 figsize = config_fig.get("size_inches", None))
 
-
-        #--------------------- Adjust the figure ---------------------#
-
+        #-------------------------------------------------------------#
 
         # If there is a configuration to adjust the figure
         if config_fig:
 
             # Adjust the sub-plots, if a configuration for
-            # them is provided
+            # them is provided.
             plt.subplots_adjust(**config_fig.get("subplots", {}))
 
-
-        # For each extra axis in the figure
-        for ax in axes.flat[num_plots:]:
-
-            # Remove it
-            ax.remove()
-
-
-        #-------------------- Generate the plots ---------------------#
-
+        #-------------------------------------------------------------#
             
         # For each data frame
-        for num_df, (df_res, ax) in enumerate(zip(dfs_chunk,
-                                             axes.flat)):
+        for num_df, (df_res, ax) in \
+            enumerate(zip(dfs_chunk,
+                          axes.flat[:len(dfs_chunk)])):
 
-            # Substitute infinite values with NaN
+            # Take only the columns of interest.
+            df_res = \
+                df_res[\
+                    [col for col in df_res.columns \
+                     if col.startswith("ENSG")]]
+            
+            #---------------------------------------------------------#
+
+            # Substitute infinite values with NaN.
             df_res = df_res.replace([np.inf, -np.inf], np.nan)
 
-            # Take all residuals
+            #---------------------------------------------------------#
+
+            # Take all residuals.
             residuals = df_res.values.flatten()
 
+            #---------------------------------------------------------#
 
-            #---------------- Generate the histogram -----------------#
-
-
-            # Generate the histogram
+            # Generate the histogram.
             n, bins, patches = ax.hist(x = residuals,
                                        **config_hist)
 
-
-            #--------------------- Set the title ---------------------#
-
+            #---------------------------------------------------------#
 
             # If the user provided the names of the data frames
             if dfs_names is not None:
 
-                # Get the title for the current plot
+                # Get the title for the current plot.
                 title = \
                     dfs_names[(num_output * num_plots) + num_df]
                 
                 # Set the current plot's title based on the
-                # data frame that is being plotted
+                # data frame that is being plotted.
                 ax.set_title(label = title,
                              **config_title)
 
+            #---------------------------------------------------------#
 
-            #-------------------- Set the spines ---------------------#
-
-
-            # Hide the top and right spine
+            # Hide the top and right spine.
             for spine in ["top", "right"]:
                 ax.spines[spine].set_visible(False)
 
-            # Set the position of the bottom and left spine
-            for spine in ["bottom", "left"]:
-                ax.spines[spine].set_position(("outward", 5))
-
-
-            #-------------------- Set the x-axis ---------------------#
-
+            #---------------------------------------------------------#
 
             # If a configuration for the x-axis was provided
             if config_x_axis:
 
-                # Get user-defined ticks, if provided
+                # Get user-defined ticks, if provided.
                 x_ticks = config_x_axis.get("ticks")
 
                 # If no user-defined ticks were provided
                 if x_ticks is None:
 
-                    # Get the positions of the ticks on the axis
+                    # Get the positions of the ticks on the axis.
                     x_ticks = \
-                        _util._get_ticks_positions(\
+                        _util.get_ticks_positions(\
                             values = bins,
                             item = "x-axis",
                             config = config_x_axis)
 
-                # Set the axis
-                _util._set_axis(ax = ax,
-                                axis = "x",
-                                config = config_x_axis,
-                                ticks = x_ticks)
+                # Set the axis.
+                _util.set_axis(ax = ax,
+                               axis = "x",
+                               config = config_x_axis,
+                               ticks = x_ticks)
 
-
-            #-------------------- Set the y-axis ---------------------#
-
+            #---------------------------------------------------------#
 
             # If a configuration for the y-axis was provided
             if config_y_axis:
 
-                # Get user-defined ticks, if provided
+                # Get user-defined ticks, if provided.
                 y_ticks = config_y_axis.get("ticks")
 
                 # If no user-defined ticks were provided
                 if y_ticks is None:
                 
-                    # Get the positions of the ticks on the axis
+                    # Get the positions of the ticks on the axis.
                     y_ticks = \
-                        _util._get_ticks_positions(\
+                        _util.get_ticks_positions(\
                             values = n,
                             item = "y-axis",
                             config = config_y_axis)
 
-                # Set the axis
-                _util._set_axis(ax = ax,
-                                axis = "y",
-                                config = config_y_axis,
-                                ticks = y_ticks)
+                # Set the axis.
+                _util.set_axis(ax = ax,
+                               axis = "y",
+                               config = config_y_axis,
+                               ticks = y_ticks)
 
-
-            #----------------- Set the vertical line -----------------#
-
+            #---------------------------------------------------------#
 
             # If a configuration for the line was provided
             if config_vline:
 
-                # Plot the vertical line
+                # Plot the vertical line.
                 ax.axvline(**config_vline)
 
-
-            #------------------- Set the colorbar --------------------#
-
+            #---------------------------------------------------------#
 
             # If a configuration for the colorbar was provided
             if config_cbar:
 
-                # Normalize object to map the colors to the
-                # histogram heights
+                # Create a 'Normalize' object to map the colors to the
+                # histogram heights.
                 norm = Normalize(vmin = y_ticks[0],
                                  vmax = y_ticks[-1])
 
-                # Get the colormap
+                # Get the colormap.
                 cmap = plt.get_cmap(config_cbar.get("cmap", "viridis"))
 
-                # Color the histogram bars based on the
-                # normalized height
+                # Color the histogram bars based on the normalized
+                # height.
                 for count, patch in zip(n, patches):
                     color = cmap(norm(count))
                     patch.set_facecolor(color)
 
-                # Create a ScalarMappable to use for the
-                # colorbar
+                # Create a 'ScalarMappable' object to use for the
+                # colorbar.
                 sm = ScalarMappable(cmap = cmap,
                                     norm = norm)
                 
-                # Set a dummy array for the colorbar to work
+                # Set a dummy array for the colorbar to work.
                 sm.set_array([])
 
-                # Add the colorbar
+                # Add the colorbar.
                 cbar = plt.colorbar(sm,
                                     ax = ax,
                                     **config_cbar["options"])
 
-                # Get user-defined ticks, if provided
+                # Get user-defined ticks, if provided.
                 cbar_ticks = config_cbar.get("ticks")
 
                 # If no user-defined ticks were provided
                 if cbar_ticks is None:
                 
-                    # Get the positions of the ticks on the axis
+                    # Get the positions of the ticks on the axis.
                     cbar_ticks = \
-                        _util._get_ticks_positions(\
+                        _util.get_ticks_positions(\
                             values = n,
                             item = "cbar",
                             config = config_cbar)
 
-                # Set the colorbar's axis
-                _util._set_cbar_axis(cbar = cbar,
-                                     config = config_cbar,
-                                     ticks = cbar_ticks)
+                # Set the colorbar's axis.
+                _util.set_cbar_axis(cbar = cbar,
+                                    config = config_cbar,
+                                    ticks = cbar_ticks)
 
+        #-------------------------------------------------------------#
 
-        #----------------------- Save the plot -----------------------#
+        # For each extra axis in the figure
+        for ax in axes.flat[len(dfs_chunk):]:
 
+            # Set it to mimic the last one in the figure.
 
-        # Set the name of the output file
+            # Set the x-axis.
+            ax = _util.set_axis(ax = ax,
+                                axis = "x",
+                                config = config_x_axis,
+                                ticks = x_ticks)
+
+            #---------------------------------------------------------#
+
+            # Set the y-axis.
+            ax = _util.set_axis(ax = ax,
+                                axis = "y",
+                                config = config_y_axis,
+                                ticks = y_ticks)
+
+            #---------------------------------------------------------#
+
+            # Remove it.
+            ax.set_visible(False)
+
+        #-------------------------------------------------------------#
+
+        # Set the name of the output file.
         output_file = output_prefix + f"{num_output+1}.{output_fmt}"
 
-        # Write the plot in the output file
+        # Write the plot in the output file.
         plt.savefig(fname = output_file,
                     **config["output"])
 
-        # Close any figure that may be open
+        # Close any figure that may be open.
         plt.close()

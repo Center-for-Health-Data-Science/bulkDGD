@@ -311,7 +311,7 @@ def main(args):
         "The residual values for the samples were successfully found.")
 
     #-----------------------------------------------------------------#
-    print(all_res)
+
     # Concatenate all residual values into one data frame and
     # transpose it.
     df_res = pd.concat(all_res,

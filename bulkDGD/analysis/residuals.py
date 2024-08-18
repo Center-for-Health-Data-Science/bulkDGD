@@ -281,7 +281,9 @@ def get_residuals(obs_counts,
 
 def get_genes_by_residual_threshold(df_res,
                                     le_than = -1,
-                                    ge_than = 1):
+                                    ge_than = 1,
+                                    sort_genes = False,
+                                    ascending = False):
     """Get the genes whose residuals fall in specified intervals and
     are common to a certain number of samples.
 
@@ -301,54 +303,53 @@ def get_genes_by_residual_threshold(df_res,
 
     Returns
     -------
-    df_samples_count : ``pandas.DataFrame``
+    df_samples_count_le : :class:`pandas.DataFrame`
         A data frame containing each gene with the count of samples
-        meeting either the lower than or equal (``le_than``) or
-        greater than or equal (``ge_than``) conditions. 
+        where the gene's residual value is lower than or equal to
+        ``le_than``. 
 
         The data frame's rows are identified by each gene's ID (as
         provided in the input data frame) and the data frame includes
         one column:
-        - 'n_samples': the number of samples where the gene's residual
-          meets the conditions.
 
-    df_genes_distribution : ``pandas.DataFrame``
-        A data frame displaying the distribution of genes meeting the
-        condition of having a residual value either lower than or equal
-        to ``le_than`` or higher than or equal to ``ge_than`` across
+        - 'n_samples': the number of samples where the gene's residual
+          meets the condition.
+
+    df_genes_distribution_le : :class:`pandas.DataFrame`
+        A data frame displaying the distribution of genes having a
+        residual value lower than or equal to ``le_than``  across
         different sample counts.
 
         Each row represents the number of samples, and the columns are:
+
         - 'n_genes': the number of genes that meet the condition in
           exactly that many samples.
         - 'genes': a period-separated string listing the genes that
           meet the condition in exactly that many samples.
 
-    Examples
-    --------
-    .. code-block:: python
+    df_samples_count_ge : :class:`pandas.DataFrame`
+        A data frame containing each gene with the count of samples
+        where the gene's residual value is greater than or equal to
+        ``ge_than``. 
+
+        The data frame's rows are identified by each gene's ID (as
+        provided in the input data frame) and the data frame includes
+        one column:
+
+        - 'n_samples': the number of samples where the gene's residual
+          meets the condition.
+
+    df_genes_distribution_ge : :class:`pandas.DataFrame`
+        A data frame displaying the distribution of genes having a
+        residual value greater than or equal to ``le_than``  across
+        different sample counts.
+
+        Each row represents the number of samples, and the columns are:
         
-        # Assuming 'df_res' is a data frame with residuals.
-        >>> df_samples_count, df_genes_distribution = \
-                get_genes_by_residual_threshold(df_res, 
-                                                le_than = -1.5,
-                                                ge_than = 2.0)
-
-        # Visualize the first rows of the first data frame.
-        >>> df_samples_count.head()
-                   gene  n_samples
-        ENSG00000187634         18
-        ENSG00000188976          6
-        ENSG00000187961         21
-        ENSG00000187583         17
-        ENSG00000187642         15
-
-        # Visualize the first rows of the second data frame.
-        >>> df_genes_distribution.head()
-             n_genes                                              genes
-                 300  ENSG00000183726.ENSG00000117713.ENSG0000009027...
-                 760  ENSG00000160075.ENSG00000248333.ENSG0000015791...
-                1020  ENSG00000127054.ENSG00000175756.ENSG0000007836...
+        - 'n_genes': the number of genes that meet the condition in
+          exactly that many samples.
+        - 'genes': a period-separated string listing the genes that
+          meet the condition in exactly that many samples..
     """
 
     # Get the names of the cells containing residual values.
@@ -366,22 +367,44 @@ def get_genes_by_residual_threshold(df_res,
     # or equal to the specified value.
     condition_ge = df_res_data >= ge_than
 
-    # Combine the two conditions into one using the OR connector.
-    combined_condition = condition_le | condition_ge
-
     #-----------------------------------------------------------------#
 
-    # Count the number of samples meeting the full condition for each
-    # gene.
-    samples_count = combined_condition.sum(axis = 0)
+    # Count the number of samples meeting the first condition.
+    samples_count_le = condition_le.sum(axis = 0)
+
+    # Count the number of samples meeting the second condition.
+    samples_count_ge = condition_ge.sum(axis = 0)
 
     #-----------------------------------------------------------------#
 
     # Create a data frame containing genes and their count of samples
-    # meeting the condition.
-    df_samples_count = \
+    # meeting the first condition.
+    df_samples_count_le = \
         pd.DataFrame({"gene": df_res_data.columns,
-                      "n_samples": samples_count})
+                      "n_samples": samples_count_le})
+
+    # Create a data frame containing genes and their count of samples
+    # meeting the second condition.
+    df_samples_count_ge = \
+        pd.DataFrame({"gene": df_res_data.columns,
+                      "n_samples": samples_count_ge})
+
+    #-----------------------------------------------------------------#
+
+    # If the genes must be sorted by the number of samples.
+    if sort_genes:
+
+        # Sort the first data frame by the number of samples.
+        df_samples_count_le = \
+            df_samples_count_le.sort_values(\
+                by = "n_samples",
+                ascending = ascending)
+
+        # Sort the second data frame by the number of samples.
+        df_samples_count_ge = \
+            df_samples_count_ge.sort_values(\
+                    by = "n_samples",
+                    ascending = ascending)
 
     #-----------------------------------------------------------------#
 
@@ -393,50 +416,81 @@ def get_genes_by_residual_threshold(df_res,
 
     # Create an empty dictionary to store the data about how the genes
     # are distributed according to in how many samples they meet the
-    # given condition.
-    distribution_data = {"n_genes": [], "genes": []}
+    # first condition.
+    distribution_data_le = {"n_genes": [], "genes": []}
 
-    # Add a row for genes not meeting the condition in any samples.
-
-    # Add the number of genes not meeting the condition in any samples.
-    distribution_data["n_genes"].append(\
-        df_samples_count[\
-            df_samples_count["n_samples"] == 0].shape[1])
-
-    # Add the list of genes not meeting the condition in any samples.
-    distribution_data["genes"].append(\
-        ".".join(df_samples_count[\
-            df_samples_count["n_samples"] == 0]["gene"]))
+    # Create an empty dictionary to store the data about how the genes
+    # are distributed according to in how many samples they meet the
+    # second condition.
+    distribution_data_ge = {"n_genes": [], "genes": []}
 
     # For each possible number of samples in which the genes meet the
     # condition.
-    for i in range(1, n_all_samples + 1):
+    for i in range(n_all_samples + 1):
 
-        # Find the genes that meet the conditions in the current number
-        # of samples.
-        genes_meeting_i_samples = \
-            df_samples_count[\
-                df_samples_count["n_samples"] == i]["gene"]
+        # Find the genes that meet the first condition in the current
+        # number of samples.
+        genes_meeting_i_samples_le = \
+            df_samples_count_le[\
+                df_samples_count_le["n_samples"] == i]["gene"]
         
-        # Add the number of genes to the dictionary.
-        distribution_data["n_genes"].append(\
-            len(genes_meeting_i_samples))
+        # Find the genes that meet the second condition in the current
+        # number of samples.
+        genes_meeting_i_samples_ge = \
+            df_samples_count_ge[\
+                df_samples_count_ge["n_samples"] == i]["gene"]
+        
+        # Add the number of genes to the first dictionary.
+        distribution_data_le["n_genes"].append(\
+            len(genes_meeting_i_samples_le))
+        
+        # Add the number of genes to the second dictionary.
+        distribution_data_ge["n_genes"].append(\
+            len(genes_meeting_i_samples_ge))
 
-        # Add the list of genes to the dictionary.
-        distribution_data["genes"].append(\
-            ".".join(genes_meeting_i_samples))
+        # Add the list of genes to the first dictionary.
+        distribution_data_le["genes"].append(\
+            ".".join(genes_meeting_i_samples_le))
 
-    # Convert the dictionary into a data frame.
-    df_genes_distribution = \
-        pd.DataFrame(distribution_data, 
+        # Add the list of genes to the second dictionary.
+        distribution_data_ge["genes"].append(\
+            ".".join(genes_meeting_i_samples_ge))
+    
+    #-----------------------------------------------------------------#
+
+    # Convert the first dictionary into a data frame.
+    df_genes_distribution_le = \
+        pd.DataFrame(distribution_data_le, 
+                     index = range(0, n_all_samples + 1))
+
+    # Convert the second dictionary into a data frame.
+    df_genes_distribution_ge = \
+        pd.DataFrame(distribution_data_ge, 
                      index = range(0, n_all_samples + 1))
 
     #-----------------------------------------------------------------#
 
     # Update the index of the first data frame.
-    df_samples_count = df_samples_count.set_index("gene")
+    df_samples_count_le = df_samples_count_le.set_index("gene")
+
+    # Update the index of the second data frame.
+    df_samples_count_ge = df_samples_count_ge.set_index("gene")
 
     #-----------------------------------------------------------------#
 
-    # Return the two data frames.
-    return df_samples_count, df_genes_distribution
+    # If the genes must be sorted by the number of samples.
+    if sort_genes:
+
+        # Sort the first data frame by the number of samples.
+        df_genes_distribution_le = \
+            df_genes_distribution_le.sort_index(ascending = ascending)
+        
+        # Sort the second data frame by the number of samples.
+        df_genes_distribution_ge = \
+            df_genes_distribution_ge.sort_index(ascending = ascending)
+
+    #-----------------------------------------------------------------#
+
+    # Return the data frames.
+    return df_samples_count_le, df_genes_distribution_le, \
+           df_samples_count_ge, df_genes_distribution_ge
