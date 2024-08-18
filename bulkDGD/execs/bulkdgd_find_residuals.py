@@ -22,6 +22,7 @@
 #    License along with this program. 
 #    If not, see <http://www.gnu.org/licenses/>.
 
+
 #######################################################################
 
 
@@ -254,30 +255,42 @@ def main(args):
     
     #-----------------------------------------------------------------#
 
+    # Initialize an empty list to store the residuals for all
+    # samples.
+    all_res = []
+
     # Try to find the residuals.
     try:
 
-        # Initialize an empty list to store the residuals for all
-        # samples.
-        all_res = []
+        # For each sample
+        for i in range(df_samples.shape[0]):
+            
+            # Get the current sample.
+            sample = df_samples.iloc[i]
 
-        # For each sample and associated predicted means and
-        # r-values (they appear in the same order in the inputs)
-        for i, (sample_name, sample), (_, means_sample), \
-                in zip(df_samples.iterrows(), \
-                        df_pred_means.iterrows()):
+            # Get the name of the current sample.
+            sample_name = df_samples.index[i]
+
+            # Get the predicted means for the current sample.
+            means_sample = df_pred_means.iloc[i]
             
             # If the r-values were passed
             if df_r_values is not None:
 
                 # Get the r-values for the current sample.
-                _, r_values_sample = df_r_values.iloc[i]
+                r_values_sample = df_r_values.iloc[i]
+            
+            # Otherwise
+            else:
+
+                # The r-values will be None.
+                r_values_sample = None
 
             # Get the residual vector for the current sample.
             res = residuals.get_residuals(obs_counts = sample,
-                                        pred_means = means_sample,
-                                        r_values = r_values_sample,
-                                        sample_name = sample_name)
+                                          pred_means = means_sample,
+                                          r_values = r_values_sample,
+                                          sample_name = sample_name)
 
             # Save the current residual vector in the list of
             # residuals.
@@ -291,13 +304,14 @@ def main(args):
             "It was not possible to find the residuals. " \
             f"Error: {e}"
         logger.exception(errstr)
+        sys.exit(errstr)
 
     # Inform the user that the residuals were successfully found.
     logger.info(\
         "The residual values for the samples were successfully found.")
 
     #-----------------------------------------------------------------#
-
+    print(all_res)
     # Concatenate all residual values into one data frame and
     # transpose it.
     df_res = pd.concat(all_res,

@@ -37,7 +37,7 @@ __doc__ = "Utilities to compute vectors of residuals."
 import logging as log
 # Import from third-party packages.
 import pandas as pd
-from scipy.stats import nbinom, norm
+from scipy.stats import nbinom, norm, poisson
 import torch
 
 
@@ -62,129 +62,189 @@ def get_residuals(obs_counts,
 
     Parameters
     ----------
-    obs_counts : ``pandas.Series``
+    obs_counts : :class:`pandas.Series`
         The observed gene counts in a single sample.
 
         This is a series whose index contains either the genes'
-        Ensembl IDs or names of columns with additional information
-        about the sample.
+        Ensembl IDs or names of fields containing additional
+        information about the sample.
 
-    pred_means : ``pandas.Series``
-        The predicted means of the negative binomials modeling the
-        gene counts for a single sample.
+    pred_means : :class:`pandas.Series`
+        The predicted means of the distributions modelling
+        the genes' counts in a single sample.
 
         This is a series whose index contains either the genes'
-        Ensembl IDs or names of columns with additional information
-        about the sample.
+        Ensembl IDs or names of fields containing additional
+        information about the sample.
 
-    r_values : ``pandas.Series``
-        A series containing one r-value for each negative binomial
-        (= one r-value for each gene).
+        If the genes' counts were modelled using negative binomial
+        distributions, the predicted means are scaled by the
+        corresponding distributions' r-values.
 
-    sample_name : ``str``, optional
+    r_values : :class:`pandas.Series`, optional
+        The predicted r-values of the negative binomial distributions
+        modelling the genes' counts in a single sample, if the genes'
+        counts were modelled using negative binomial distributions.
+
+        This is a series whose index contains either the genes'
+        Ensembl IDs or names of fields containing additional
+        information about the sample.
+
+        If ``r_values`` is not provided, it is assumed that the genes'
+        counts were modelled using Poisson distributions.
+
+    sample_name : :class:`str`, optional
         The name of the sample under consideration. It is used as
-        name for the ``pandas.Series`` returned.
+        name for the :class:`pandas.Series` returned.
 
         If not passed, the series will be unnamed.
 
     Returns
     -------
-    series_residuals : ``pandas.Series``
+    series_residuals : :class:`pandas.Series`
         A series containing the residuals for all genes.
     """
 
     # Get the names of the cells containing gene expression data from
-    # the original series for the observed gene counts.
+    # the series containing the observed gene counts.
     genes_obs = \
         [col for col in obs_counts.index if col.startswith("ENSG")]
 
+    #-----------------------------------------------------------------#
+
     # Get the names of the cells containing gene expression data from
-    # the original series for the predicted means.
+    # the series containing the predicted means.
     genes_pred = \
         [col for col in pred_means.index if col.startswith("ENSG")]
 
-    # Get the names of the cells containing r-values from the series
-    # of r-values.
-    genes_r_values = r_values.index
+    #-----------------------------------------------------------------#
 
     # If the lists do not contain the same genes
-    if set(genes_obs) != set(genes_pred) != set(genes_r_values):
+    if set(genes_obs) != set(genes_pred):
 
-        # Raise an error
+        # Raise an error.
         errstr = \
-            "The set of genes in 'obs_counts', 'pred_means', " \
-            "and 'r_values' must be the same."
+            "The set of genes in 'obs_counts' and 'pred_means', " \
+            "must be the same. It is assumed that the genes are " \
+            "specified using their Ensembl IDs."
         raise ValueError(errstr)
 
     #-----------------------------------------------------------------#
 
-    # Create a tensor with only those columns containing gene
-    # expression data for the observed gene counts.
-    obs_counts = \
-        torch.Tensor(pd.to_numeric(obs_counts.loc[genes_obs]).values)
+    # If the r-values were passed
+    if r_values is not None:
+
+        # Get the names of the cells containing r-values from the
+        # series of r-values.
+        genes_r_values =  \
+            [col for col in r_values.index if col.startswith("ENSG")]
+
+        # If the lists do not contain the same genes
+        if set(genes_obs) != set(genes_pred) != set(genes_r_values):
+
+            # Raise an error.
+            errstr = \
+                "The set of genes in 'obs_counts', 'pred_means', " \
+                "and 'r_values' must be the same. It is assumed " \
+                "that the genes are specified using their Ensembl IDs."
+            raise ValueError(errstr)
+
+        # Create a tensor containing only those columns containing gene
+        # expression data for the predicted r-values - the 'loc' syntax
+        # should return the columns in the order specified by the
+        # selection.
+        r_values = \
+            torch.Tensor(\
+                pd.to_numeric(r_values.loc[genes_r_values]).values)
 
     #-----------------------------------------------------------------#
 
-    # Create a tensor with only those columns containing gene
-    # expression data for the predicted means - the 'loc' should
-    # return the selected columns in the correct order.
-    pred_means = \
-        torch.Tensor(pd.to_numeric(pred_means.loc[genes_obs]).values)
+    # Create a tensor containing only those columns containing gene
+    # expression data for the observed gene counts - the 'loc' syntax
+    # should return the columns in the order specified by the
+    # selection.
+    obs_counts = \
+        torch.Tensor(\
+            pd.to_numeric(obs_counts.loc[genes_obs]).values)
 
-    # Get the mean gene counts for the sample. The output is a single
-    # value.
+    #-----------------------------------------------------------------#
+
+    # Create a tensor containing only those columns containing gene
+    # expression data for the predicted mean counts - the 'loc' syntax
+    # should return the columns in the order specified by the
+    # selection.
+    pred_means = \
+        torch.Tensor(\
+            pd.to_numeric(pred_means.loc[genes_obs]).values)
+
+    #-----------------------------------------------------------------#
+
+    # Get the mean gene counts for the sample.
+    #
+    # The output is a single value.
     obs_counts_mean = torch.mean(obs_counts).unsqueeze(-1)
 
-    # Get the rescaled predicted means of the negative binomials
-    # (one for each gene). This is a 1D tensor with:
-    #
-    # - 1st dimension: the dimensionality of the output (= gene)
-    #                  space
-    pred_means = pred_means * obs_counts_mean
-
     #-----------------------------------------------------------------#
 
-    # Sort the r-values so be sure they are in the same order as the
-    # genes in the observed counts/predicted genes.
-    r_values = \
-        torch.Tensor(r_values.reindex(index = genes_obs).values)
+    # Rescale the predicted means by the mean gene counts.
+    #
+    # The output is a 1D tensor containing the rescaled means.
+    pred_means = pred_means * obs_counts_mean
 
     #-----------------------------------------------------------------#
 
     # Create an empty list to store the residuals.
     residuals = []
 
-    # For each gene's predicted mean count, observed count, and
-    # associated r-value.
-    for pred_mean_gene_i, obs_count_gene_i, r_value_gene_i in \
-        zip(pred_means, obs_counts, r_values):
+    # For each gene's observed count, predicted mean count, and r-value
+    for i, (obs_count_gene_i, pred_mean_gene_i) \
+        in enumerate(zip(obs_counts, pred_means)):
 
         #-------------------------------------------------------------#
 
-        # Calculate the probability of "failure" from the r-value
-        # (number of failures till the experiment is stopped) and
-        # the mean of the negative binomial. This is a single value,
-        # and is calculated from the mean 'm' as:
-        #
-        # m = r(1-p) / p
-        # mp = r - rp
-        # mp + rp = r
-        # p(m+r) = r
-        # p = r / (m + r)
-        p_i = pred_mean_gene_i.item() / \
-              (pred_mean_gene_i.item() + r_value_gene_i.item())
+        # If negative binomial distributions were used to model the
+        # genes' counts
+        if r_values is not None:
+
+            # Get the r-value for the current gene.
+            r_value_gene_i = r_values[i]
+
+            # Calculate the probability of "success" from the r-value
+            # (number of successes till the experiment is stopped) from
+            # the mean of the negative binomial. This is a single
+            # value, and is calculated from the mean 'm' of the
+            # negative binomial as:
+            #
+            # m = r(1-p) / p
+            # mp = r - rp
+            # mp + rp = r
+            # p(m+r) = r
+            # p = r / (m + r)
+            p_i = pred_mean_gene_i.item() / \
+                  (pred_mean_gene_i.item() + r_value_gene_i.item())
+
+            #---------------------------------------------------------#
+
+            # Get the value of the cumulative negative binomial
+            # distribution.
+            #
+            # Since SciPy's negative binomial function is implemented
+            # as function of the number of failures, their 'p' is
+            # equivalent to our '1-p' and their 'n' is our 'r'
+            cdf_nb_value = \
+                nbinom.cdf(k = obs_count_gene_i.item(),
+                           n = r_value_gene_i.item(),
+                           p = 1 - p_i).item()
 
         #-------------------------------------------------------------#
+        
+        # If Poisson distributions were used to model the genes' counts
+        else:
 
-        # Get the value of the cumulative negative binomial
-        # distribution.
-        #
-        # Since SciPy's negative binomial function is implemented
-        # as function of the number of failures, their 'p' is
-        # equivalent to our '1-p' and their 'n' is our 'r'
-        cdf_nb_value = nbinom.cdf(k = obs_count_gene_i,
-                                  n = r_value_gene_i.item(),
-                                  p = 1 - p_i).item()
+            # Get the value of the cumulative Poisson distribution.
+            cdf_nb_value = \
+                poisson.cdf(k = obs_count_gene_i.item(),
+                            mu = pred_mean_gene_i.item()).item()
 
         #-------------------------------------------------------------#
         
