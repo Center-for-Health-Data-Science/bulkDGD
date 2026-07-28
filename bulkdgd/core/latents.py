@@ -57,12 +57,16 @@ __doc__ = \
 
 
 # Import from the standard library.
+import copy
 import logging as log
 import math
 from typing import Dict, Optional, Union
 
 # Import from third-party libraries.
 import torch
+
+# The low-rank covariance, which adds a type tgmm does not have.
+from . import lowrank
 import torch.nn as nn
 import tgmm
 
@@ -1385,7 +1389,8 @@ class GaussianMixtureModelLegacy(nn.Module):
                    file)
 
 
-class GaussianMixtureModelTGMM(tgmm.GaussianMixture):
+class GaussianMixtureModelTGMM(lowrank.LowRankMixin,
+                               tgmm.GaussianMixture):
 
     """Compatibility wrapper for :class:`tgmm.GaussianMixture`.
     """
@@ -1393,7 +1398,7 @@ class GaussianMixtureModelTGMM(tgmm.GaussianMixture):
     # Set the supported types of covariance matrix.
     COVARIANCE_TYPES = \
         ["full", "spherical", "diag", "tied_full", "tied_spherical",
-         "tied_diag"] 
+         "tied_diag", "low_rank"]
 
     # Set the supported initializaton methods for the means of the
     # components of the Gaussian mixture model.
@@ -1713,6 +1718,7 @@ class GaussianMixtureModelTGMM(tgmm.GaussianMixture):
                 device = args[0]
 
             # If the first argument is a torch.Tensor
+            elif isinstance(args[0], torch.Tensor):
                 device = args[0].device
 
         # If a device was specified in the keyword arguments
@@ -1774,20 +1780,66 @@ class GaussianMixtureModelTGMM(tgmm.GaussianMixture):
         """Get the state dictionary containing the parameters of the model.
         """
 
-        return self.save_state_dict()
+        d = self.save_state_dict()
+
+        # The low-rank covariance keeps its parameters outside
+        # 'covariances_', so tgmm's own state dictionary does not see
+        # them.
+        #
+        # Without this a low-rank model would SAVE and RELOAD as
+        # whatever the parent's 'covariances_' happened to hold - a
+        # model that looks fine, loads without complaint, and is not
+        # the model that was trained. The keys are absent for every
+        # other covariance type, so nothing else changes.
+        d.update(self.lr_state())
+
+        return d
 
 
     def load_state_dict(self, state_dict, strict=False, *args, **kwargs):
         """Load the state dictionary.
         """
 
+        # Take the low-rank parameters out before handing the rest to
+        # tgmm, which would not recognise them.
+        lr_keys = ("factors_", "psi_", "rank")
+
+        lr_state = {k: state_dict[k] for k in lr_keys
+                    if k in state_dict}
+
+        state_dict = {k: v for k, v in state_dict.items()
+                      if k not in lr_keys}
+
         # Call the tgmm load_state_dict.
         super().load_state_dict(state_dict)
+
+        self.load_lr_state(lr_state)
 
         # Return a dummy NamedTuple to satisfy PyTorch's API.
         from collections import namedtuple
         _IncompatibleKeys = namedtuple('_IncompatibleKeys', ['missing_keys', 'unexpected_keys'])
         return _IncompatibleKeys(missing_keys=[], unexpected_keys=[])
+
+
+    #-----------------------------------------------------------------#
+
+
+    def save(self, file):
+        """Save the model's parameters to a .pth file.
+
+        tgmm's own ``save`` writes a fixed list of keys - 'weights_',
+        'means_', 'covariances_' and the configuration - and knows
+        nothing of the low-rank factors, which live OUTSIDE
+        'covariances_'. Training calls this method, so without the
+        override a low-rank model saves the spherical fallback its
+        parent left in 'covariances_' and reloads as a model that was
+        never trained. Routing through 'state_dict' - which adds
+        'factors_'/'psi_'/'rank' for the low-rank case and is identical
+        to the parent's dictionary for every other - fixes the save at
+        its source, and the matching 'load_state_dict' reads it back.
+        """
+
+        torch.save(self.state_dict(), file)
 
 
 #------------------------ Representation layer -----------------------#
@@ -3019,9 +3071,269 @@ class RepresentationLayer(nn.Module):
 #######################################################################
 
 
+#--------------------- The final Gaussian mixture --------------------#
+
+
+def fit_final_gmm(gmm,
+                  reps: torch.Tensor,
+                  covariance_type: str,
+                  shrinkage: float = 0.0,
+                  reg_covar: Optional[float] = None,
+                  chunk_size: int = 2048):
+    """Refit a trained Gaussian mixture model's covariance on the
+    final representations, with the means and the weights frozen.
+
+    The mixture a model is trained with is a prior, and its job during
+    training is to supply the component means the search for a
+    representation starts from. It contributes a hundredth of a
+    percent of the objective, so it cannot move a representation
+    wherever its covariance points, and it is given the cheapest
+    covariance that works.
+
+    Once training is over the mixture has a second job, which is to be
+    the density of the latent space: what a sample's probability
+    density is, which component it belongs to, how atypical it is, and
+    which directions a sampler should draw in. That job is decided
+    entirely by the covariance the first job did not need.
+
+    So it is refitted here, afterwards, on the representations
+    training arrived at. The means and the weights are **frozen** at
+    the values training left them: this is one closed-form M-step
+    against the trained model's own responsibilities, nothing
+    iterates, and no component can drift onto a different part of the
+    latent space and quietly take a different label with it. Every
+    component keeps its identity, and only the shape it is measured
+    through changes.
+
+    The result is a **separate** mixture. It is not the prior, it does
+    not replace the prior, and it must not be used as one: it is
+    fitted to the representations the prior produced, so using it to
+    produce them would be circular.
+
+    Parameters
+    ----------
+    gmm : :class:`GaussianMixtureModelTGMM`
+        The trained Gaussian mixture model.
+
+    reps : :class:`torch.Tensor`
+        The final representations, as a 2D tensor whose first
+        dimension is the number of samples and whose second dimension
+        is the dimensionality of the latent space.
+
+    covariance_type : :class:`str`
+        The type of covariance matrix the final mixture should have.
+
+    shrinkage : :class:`float`, ``0.0``
+        How far each per-component covariance is pulled back towards
+        the one shared by all components, between 0.0 and 1.0.
+
+        A per-component full covariance in 32 dimensions is 528
+        numbers per component, against however many samples that
+        component collected to fit them from, which is what makes an
+        unshrunk ``full`` fit return negative variances. The shrinkage
+        is what makes it estimable, and it is ignored by the tied
+        covariance types, which have nothing to shrink towards.
+
+    reg_covar : :class:`float`, optional
+        The value added to the diagonal of the covariance. If not
+        passed, the trained mixture's own value is used.
+
+    chunk_size : :class:`int`, ``2048``
+        How many samples are held in memory at a time. The scatter is
+        accumulated over chunks because its intermediate holds one
+        matrix per sample per component.
+
+    Returns
+    -------
+    gmm_final : :class:`GaussianMixtureModelTGMM`
+        A copy of the input mixture, with the same means and the same
+        weights, and with the refitted covariance.
+    """
+
+    # If the covariance type is not one the mixture supports
+    if covariance_type not in gmm.COVARIANCE_TYPES:
+
+        # Raise an error.
+        errstr = \
+            f"Unsupported covariance type '{covariance_type}'. The " \
+            "supported covariance types are: " \
+            f"{', '.join(gmm.COVARIANCE_TYPES)}."
+        raise ValueError(errstr)
+
+    #-----------------------------------------------------------------#
+
+    # If the shrinkage is not a proportion
+    if not 0.0 <= shrinkage <= 1.0:
+
+        # Raise an error.
+        errstr = \
+            f"'shrinkage' must be between 0.0 and 1.0, not " \
+            f"{shrinkage}."
+        raise ValueError(errstr)
+
+    #-----------------------------------------------------------------#
+
+    # Get the means of the components. They are not modified anywhere
+    # below - they are the identity of the components, and keeping
+    # them is the whole point of fitting this way.
+    means = gmm.means_
+
+    # Move the representations onto the mixture's device, and into its
+    # precision.
+    reps = reps.to(device = means.device, dtype = means.dtype)
+
+    # Get the number of components and the dimensionality of the
+    # latent space.
+    n_components, n_features = means.shape
+
+    # Initialize the responsibility-weighted scatter of each
+    # component.
+    scatter = torch.zeros(n_components,
+                          n_features,
+                          n_features,
+                          device = means.device,
+                          dtype = means.dtype)
+
+    # Initialize the responsibility mass each component collected -
+    # the effective number of samples it was fitted from.
+    n_k = torch.zeros(n_components,
+                      device = means.device,
+                      dtype = means.dtype)
+
+    # For each chunk of representations. The scatter is accumulated
+    # over chunks because its intermediate holds one matrix per sample
+    # per component, which is the largest thing in this function.
+    for i in range(0, reps.shape[0], chunk_size):
+
+        # Get the chunk.
+        chunk = reps[i:i+chunk_size]
+
+        # Get the responsibilities of the trained mixture. These are
+        # what freezes the means and the weights: the assignment is
+        # the one training ended with, and only the shape is refitted
+        # to it.
+        resp, _ = gmm._e_step(chunk)
+
+        # Put the responsibilities in the mixture's precision - the
+        # E-step may return them in another one.
+        resp = resp.to(dtype = means.dtype)
+
+        # Get the displacement of every representation from every
+        # component's mean, as a 3D tensor of shape
+        # (n_samples_in_chunk, n_components, n_features).
+        delta = chunk.unsqueeze(1) - means.unsqueeze(0)
+
+        # Add the chunk's contribution to the scatter of each
+        # component, weighted by how much of each sample that
+        # component is responsible for.
+        scatter += torch.einsum("nk,nki,nkj->kij", resp, delta, delta)
+
+        # Add the chunk's contribution to the responsibility mass.
+        n_k += resp.sum(dim = 0)
+
+    #-----------------------------------------------------------------#
+
+    # Get the covariance each component would have on its own. The
+    # clamp is for a component that collected no responsibility at
+    # all, whose covariance is meaningless either way but must not be
+    # a division by zero.
+    per_component = scatter / n_k.clamp(min = 1.0e-10)[:, None, None]
+
+    # Get the covariance all the components would share.
+    tied = scatter.sum(dim = 0) / n_k.sum()
+
+    # Pull each component's own covariance towards the shared one.
+    # This only means anything for the per-component covariance types:
+    # a tied covariance is already the thing being shrunk towards.
+    shrunk = (1.0 - shrinkage) * per_component + shrinkage * tied
+
+    #-----------------------------------------------------------------#
+
+    # If no regularization of the covariance was passed
+    if reg_covar is None:
+
+        # Use the trained mixture's own, so that the final mixture is
+        # regularized exactly as much as the prior was.
+        reg_covar = getattr(gmm, "reg_covar", 1.0e-6) or 1.0e-6
+
+    # Get an identity matrix, to add the regularization to the
+    # diagonal of the covariance types that have one.
+    eye = torch.eye(n_features,
+                    device = means.device,
+                    dtype = means.dtype)
+
+    # Reduce the full covariance to whatever shape was asked for. Each
+    # of these is the maximum-likelihood estimate under that
+    # constraint, given the same responsibilities.
+
+    # If each component gets its own full covariance matrix
+    if covariance_type == "full":
+
+        # Take the shrunk per-component covariance as it is.
+        covariances = shrunk + reg_covar * eye
+
+    # If all the components share one full covariance matrix
+    elif covariance_type == "tied_full":
+
+        # Take the shared covariance. The shrinkage does not enter:
+        # this IS what the shrinkage pulls towards.
+        covariances = tied + reg_covar * eye
+
+    # If each component gets its own axis-aligned covariance
+    elif covariance_type == "diag":
+
+        # Keep only the diagonal - the variance along each axis, with
+        # the correlations between axes dropped.
+        covariances = \
+            torch.diagonal(shrunk, dim1 = -2, dim2 = -1) + reg_covar
+
+    # If all the components share one axis-aligned covariance
+    elif covariance_type == "tied_diag":
+
+        # Keep only the diagonal of the shared covariance.
+        covariances = torch.diagonal(tied) + reg_covar
+
+    # If each component gets its own single variance
+    elif covariance_type == "spherical":
+
+        # Average the variances along the axes into one number per
+        # component, which is the maximum-likelihood estimate of a
+        # component's radius when it is required to be a sphere.
+        covariances = \
+            torch.diagonal(shrunk, dim1 = -2, dim2 = -1).mean(dim = -1) \
+            + reg_covar
+
+    # If all the components share one single variance
+    elif covariance_type == "tied_spherical":
+
+        # Average the variances along the axes of the shared
+        # covariance into one number.
+        covariances = torch.diagonal(tied).mean() + reg_covar
+
+    #-----------------------------------------------------------------#
+
+    # Copy the mixture, so that the one the model was trained with is
+    # left exactly as it is - it is still the prior, and it is still
+    # what finding a representation for a new sample goes through.
+    gmm_final = copy.deepcopy(gmm)
+
+    # Set the refitted covariance on the copy.
+    gmm_final.covariances_ = covariances
+
+    # Set the type of the refitted covariance, so that the mixture
+    # knows how to read it, and so that it is saved with the mixture.
+    gmm_final.covariance_type = covariance_type
+
+    # Return the final mixture.
+    return gmm_final
+
+
+#######################################################################
+
+
 # Set the available latent spaces.
 LATENT_SPACES = {
-    
+
     # Legacy Gaussian mixture model.
     "lgmm" : GaussianMixtureModelLegacy,
 

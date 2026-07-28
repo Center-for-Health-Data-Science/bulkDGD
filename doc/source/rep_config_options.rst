@@ -143,6 +143,12 @@ The options that can be specified are described below.
 
          * ``"mean"``, which computes the mean of the loss over the batch.
 
+      * ``"warm_start"`` is an optional dictionary that seeds the search with a data-driven starting point instead of leaving every candidate to a draw from the mixture. It can contain:
+
+         * ``"pth_file"`` is the path to a fitted ridge predictor, written by :func:`bulkdgd.core.warmstart.fit_from_model_dir`. The prediction REPLACES one of the ``"n_rep_per_comp"`` times the number of components candidates of each sample rather than being added to them, so every count the scheme assumes is unchanged. Absent by default, in which case every candidate comes from the mixture as before.
+
+           The predictor maps a sample's counts to its representation and is fitted on the model's own training representations, which it recovers with an :math:`R^2` of about 0.84 - the map is very nearly linear, not because the decoder is linear but because projecting 14,740 genes down to a few dozen numbers is massively overdetermined. It is not an encoder and enters neither the generative model nor the objective; it only chooses where the search starts. Used ALONE it reaches a worse optimum than the candidate competition does, which is why it takes one slot rather than all of them.
+
       * ``"optimization_1"`` is a dictionary of options for the first optimization round. It can contain the following options:
 
          * ``"epochs"`` is the number of epochs to run the first optimization for. This is a positive integer and defaults to ``10``.
@@ -174,6 +180,12 @@ The options that can be specified are described below.
       * ``"latent_loss_calculation"`` is a dictionary of options for the latent space loss calculation. It can contain:
 
          * ``"lambda"`` is the weight to use for the latent space loss. This is a non-negative float that defaults to ``1.0``.
+
+      * ``"warm_start"`` is an optional dictionary that seeds the search with a data-driven starting point instead of leaving every candidate to a draw from the mixture. It can contain:
+
+         * ``"pth_file"`` is the path to a fitted ridge predictor, written by :func:`bulkdgd.core.warmstart.fit_from_model_dir`. The prediction REPLACES one of the ``"n_rep_per_comp"`` times the number of components candidates of each sample rather than being added to them, so every count the scheme assumes is unchanged. Absent by default, in which case every candidate comes from the mixture as before.
+
+           The predictor maps a sample's counts to its representation and is fitted on the model's own training representations, which it recovers with an :math:`R^2` of about 0.84 - the map is very nearly linear, not because the decoder is linear but because projecting 14,740 genes down to a few dozen numbers is massively overdetermined. It is not an encoder and enters neither the generative model nor the objective; it only chooses where the search starts. Used ALONE it reaches a worse optimum than the candidate competition does, which is why it takes one slot rather than all of them.
 
       * ``"optimization_1"`` is a dictionary of options for the first optimization round. It can contain the following options:
 

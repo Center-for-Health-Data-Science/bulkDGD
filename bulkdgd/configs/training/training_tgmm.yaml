@@ -354,7 +354,7 @@ decoder_training_options:
   #-------------------------------------------------------------------#
 
   # Set the options for the learning rate scheduler.
-  lr_scheduler_type: one_cycle
+  lr_scheduler_type: one_cycle    # one_cycle | cosine | null
 
   # Set the options for the learning rate scheduler.
   lr_scheduler_options:
@@ -478,7 +478,7 @@ representations_training_options:
   #-------------------------------------------------------------------#
 
   # Set the options for the learning rate scheduler.
-  lr_scheduler_type: one_cycle
+  lr_scheduler_type: one_cycle    # one_cycle | cosine | null
 
   # Set the options for the learning rate scheduler.
   lr_scheduler_options:

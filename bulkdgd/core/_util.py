@@ -438,9 +438,17 @@ def _check_config_recursive(
         elif isinstance(template_spec, dict) and \
                 not ("switch" in template_spec or \
                      "type" in template_spec):
-            
+
             # If the section does not exist in the configuraton
             if template_key not in config:
+
+                # A section marked optional is absent because it was
+                # not asked for, not because it was forgotten. Filling
+                # it in with its defaults would turn "no such thing"
+                # into "one of these, with every option defaulted",
+                # which is a different configuration.
+                if template_spec.get("__optional__"):
+                    continue
 
                 # Initialize it.
                 config[template_key] = {}

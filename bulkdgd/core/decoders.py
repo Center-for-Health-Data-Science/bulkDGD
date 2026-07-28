@@ -112,12 +112,19 @@ class Decoder(nn.Module):
 
 
     # Set the names of the available output modules.
-    OUTPUT_MODULES = \
-        ["nb_feature_dispersion", "nb_full_dispersion", "poisson"]
+    #
+    # Read from the registry rather than written out again. There were
+    # three copies of this list - this one, the tuple that decides
+    # which names take the full-dispersion path, and the registry
+    # itself - and adding a module to the registry left the other two
+    # behind, so the decoder rejected a module the rest of the package
+    # already knew about, and said in its error message that only three
+    # existed.
+    OUTPUT_MODULES = list(outputmodules.OUTPUT_MODULES)
 
     # Set the names of the supported activation functions.
     ACTIVATIONS = \
-        ["relu", "elu"]
+        ["relu", "elu", "gelu"]
 
 
     ######################### INITIALIZATION ##########################
@@ -325,6 +332,14 @@ class Decoder(nn.Module):
                 # Set it.
                 activation = nn.ELU(inplace = True)
 
+            # If the activation function is a GELU
+            elif activation_name == "gelu":
+
+                # Set it. GELU is smooth everywhere, unlike ReLU's
+                # kink, so the decoder map has no activation
+                # boundaries - there is no 'inplace' option.
+                activation = nn.GELU()
+
             # Otherwise
             else:
 
@@ -445,12 +460,18 @@ class Decoder(nn.Module):
         # all predict a mean and a per-sample log-r-value, so the
         # decoder treats them the same; they differ only inside the
         # module, in what the dispersion is anchored to.
-        elif output_module_name in \
-                ("nb_full_dispersion", "nb_full_dispersion_shrunk",
-                 "nb_full_dispersion_tied",
-                 "nb_full_dispersion_shrunk_tied"):
+        elif output_module_name in outputmodules.OUTPUT_MODULES \
+                and issubclass(
+                    outputmodules.OUTPUT_MODULES[output_module_name],
+                    outputmodules.OutputModuleNBFullDispersion):
 
             # Get the output module's class from the registry.
+            #
+            # Asked of the registry rather than of a list of names
+            # written out here: every variant that shrinks or ties the
+            # dispersion is a subclass of the full-dispersion module
+            # and is built the same way, so being one is the condition,
+            # and a new variant needs no edit here to be reachable.
             out_module_class = \
                 outputmodules.OUTPUT_MODULES[output_module_name]
 

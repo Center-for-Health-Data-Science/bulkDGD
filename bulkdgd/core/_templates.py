@@ -169,6 +169,24 @@ _MODEL_TGMM_OPTIONS = {
         "choices" : core.latents.GaussianMixtureModelTGMM.COVARIANCE_TYPES,
         "default" : "spherical",
         },
+
+    # The rank of the covariance, for 'low_rank' only.
+    #
+    # Each component's covariance is then W W' + diag(psi) with W of
+    # this rank, which is 'rank * dim + dim' numbers per component
+    # instead of the 'dim * (dim + 1) / 2' a full covariance needs.
+    #
+    # Four is the default because that is where BIC put the optimum on
+    # both the thirty-two and the sixty-four dimensional models, and it
+    # is the order the ~9-dimensional latent manifold implies a single
+    # component should need. It is ignored by every other covariance
+    # type.
+    "rank" : {
+        "type" : (int,),
+        "condition" : lambda v: v > 0,
+        "message" : "must be a positive integer",
+        "default" : 4,
+        },
     
     # The method to use for initializing the means of the Gaussian
     # components in the Gaussian mixture model.
@@ -232,6 +250,56 @@ _MODEL_TGMM_OPTIONS = {
         "type" : (bool,),
         "default" : False,
         },
+    }
+
+
+#---------------------------------------------------------------------#
+
+
+# Set the template for the options of the Gaussian mixture model
+# fitted to the representations after training - what the latent space
+# IS, as opposed to the prior that produced it.
+_MODEL_GMM_FINAL_OPTIONS = {
+
+    # A model that does not ask for a final mixture is trained exactly
+    # as before and writes no 'gmm_final.pth'. Without this, an absent
+    # section would be filled in with its own defaults, which is a
+    # request for a final mixture rather than the absence of one.
+    "__optional__" : True,
+
+    # The type of covariance the final Gaussian mixture model should
+    # have. There is no default: a model that asks for a final mixture
+    # is asking for a covariance the prior did not have, and which one
+    # is the whole of the request.
+    "covariance_type" : {
+        "type" : (str,),
+        "choices" : core.latents.GaussianMixtureModelTGMM.COVARIANCE_TYPES,
+        },
+
+    # How far each per-component covariance is pulled back towards the
+    # one shared by all of them.
+    #
+    # It does nothing for the tied covariance types, which are already
+    # the thing being shrunk towards, and it is required for 'full':
+    # a per-component full covariance has more numbers in it than most
+    # components have samples to fit them from, and comes back with
+    # negative variances.
+    "shrinkage" : {
+        "type" : (float, int),
+        "condition" : lambda v: 0.0 <= v <= 1.0,
+        "message" : "must be between 0.0 and 1.0",
+        "default" : 0.0,
+        },
+
+    # The value added to the diagonal of the covariance. If not given,
+    # the trained mixture's own value is used.
+    "reg_covar" : {
+        "type" : (float, int),
+        "condition" : lambda v: v >= 0,
+        "message" : "must be a non-negative number",
+        "default" : None,
+        },
+
     }
 
 
@@ -315,33 +383,6 @@ _MODEL_DECODER_OPTIONS = {
                         },
                     },
 
-                # Full dispersion, with the per-sample dispersion shrunk
-                # toward a per-gene baseline. 'shrinkage_lambda' is how
-                # hard the per-sample deviation is pulled to zero: zero
-                # is the plain full-dispersion module, and larger is
-                # closer to the per-gene 'feature-dispersion' module.
-                "nb_full_dispersion_shrunk" : {
-                    "activation" : {
-                        "type" : (str,),
-                        "choices" :
-                            core.outputmodules.
-                                OutputModuleNBFullDispersion.
-                                    ACTIVATION_FUNCTIONS,
-                        },
-                    "shrinkage_lambda" : {
-                        "type" : (float, int),
-                        "condition" : lambda v: v >= 0,
-                        "message" : "must be a non-negative number",
-                        "default" : 0.5,
-                        },
-                    "r_init" : {
-                        "type" : (float, int),
-                        "condition" : lambda v: v > 0,
-                        "message" : "must be a positive number",
-                        "default" : 2,
-                        },
-                    },
-
                 # Full dispersion, tied to the mean.
                 "nb_full_dispersion_tied" : {
                     "activation" : {
@@ -359,8 +400,15 @@ _MODEL_DECODER_OPTIONS = {
                         },
                     },
 
-                # Full dispersion, tied to the mean and shrunk.
-                "nb_full_dispersion_shrunk_tied" : {
+                # Full dispersion, with a per-gene hierarchical prior
+                # on the per-sample deviation whose width is LEARNED.
+                #
+                # There is no 'shrinkage_lambda' here, and its absence
+                # is the point: the strength of the pull is what this
+                # module estimates instead of being told. What is set
+                # is only where the estimate starts and how far down it
+                # may go.
+                "nb_full_dispersion_hierarchical" : {
                     "activation" : {
                         "type" : (str,),
                         "choices" :
@@ -368,11 +416,39 @@ _MODEL_DECODER_OPTIONS = {
                                 OutputModuleNBFullDispersion.
                                     ACTIVATION_FUNCTIONS,
                         },
-                    "shrinkage_lambda" : {
+                    # Narrow to begin with, so training starts near the
+                    # stable per-gene dispersion and widens only where
+                    # the data ask for it.
+                    "sigma_init" : {
                         "type" : (float, int),
-                        "condition" : lambda v: v >= 0,
-                        "message" : "must be a non-negative number",
-                        "default" : 0.5,
+                        "condition" : lambda v: v > 0,
+                        "message" : "must be a positive number",
+                        "default" : 0.1,
+                        },
+                    # The 'log sigma' term diverges at zero, so the
+                    # width needs a floor for a gene whose deviations
+                    # all vanish.
+                    "sigma_min" : {
+                        "type" : (float, int),
+                        "condition" : lambda v: v > 0,
+                        "message" : "must be a positive number",
+                        "default" : 0.01,
+                        },
+                    # The prior on the widths themselves. Without it
+                    # the objective is unbounded - a gene whose
+                    # deviations reach zero sends its own width after
+                    # them and 'log sigma' to minus infinity.
+                    "sigma_prior" : {
+                        "type" : (float, int),
+                        "condition" : lambda v: v > 0,
+                        "message" : "must be a positive number",
+                        "default" : 0.1,
+                        },
+                    "sigma_prior_tau" : {
+                        "type" : (float, int),
+                        "condition" : lambda v: v > 0,
+                        "message" : "must be a positive number",
+                        "default" : 1.0,
                         },
                     "r_init" : {
                         "type" : (float, int),
@@ -493,13 +569,82 @@ _OPTIMIZER_ADAMW = {
 #---------------------------------------------------------------------#
 
 
+# Set the template for the options of the L-BFGS optimizer.
+_OPTIMIZER_LBFGS = {
+
+    # The learning rate for the optimizer.
+    #
+    # One, and not the small step a first-order optimizer wants: the
+    # line search decides how far to go along the direction the
+    # curvature estimate picked, so this only scales its starting
+    # guess.
+    "lr" : {
+        "type": (float, int),
+        "condition": lambda v: v > 0,
+        "message": "must be a positive number",
+        "default": 1.0,
+        },
+
+    # How many iterations the optimizer takes per step.
+    #
+    # An L-BFGS 'step' is a whole optimization, not one move, so this
+    # is what the epoch count is for a first-order optimizer - and the
+    # epoch count then says how many such optimizations to run.
+    "max_iter" : {
+        "type": (int,),
+        "condition": lambda v: v > 0,
+        "message": "must be a positive integer",
+        "default": 100,
+        },
+
+    # How many past updates are kept to approximate the curvature.
+    "history_size" : {
+        "type": (int,),
+        "condition": lambda v: v > 0,
+        "message": "must be a positive integer",
+        "default": 20,
+        },
+
+    # The line search to use, or null for a fixed step.
+    #
+    # The strong Wolfe conditions are what make the method worth
+    # having: without a line search the step length is guessed and the
+    # curvature estimate can be fed a bad pair, which is how L-BFGS
+    # diverges.
+    "line_search_fn" : {
+        "type": (str, type(None)),
+        "choices": ["strong_wolfe", None],
+        "default": "strong_wolfe",
+        },
+
+    # The gradient below which the optimizer stops.
+    "tolerance_grad" : {
+        "type": (float, int),
+        "condition": lambda v: v > 0,
+        "message": "must be a positive number",
+        "default": 1e-9,
+        },
+
+    # The change in the parameters below which it stops.
+    "tolerance_change" : {
+        "type": (float, int),
+        "condition": lambda v: v > 0,
+        "message": "must be a positive number",
+        "default": 1e-12,
+        },
+    }
+
+
+#---------------------------------------------------------------------#
+
+
 # Set the template for the optimizer's options.
 _OPTIMIZER =  {
 
     # The type of optimizer to use.
     "optimizer_type" : {
         "type": (str,),
-        "choices": ["adam", "adamw"],
+        "choices": ["adam", "adamw", "lbfgs"],
         "default": "adamw"},
 
     # The options for the optimizer.
@@ -508,7 +653,8 @@ _OPTIMIZER =  {
             "option" : "optimizer_type",
             "cases" : {
                 "adam" : _OPTIMIZER_ADAM,
-                "adamw" : _OPTIMIZER_ADAMW
+                "adamw" : _OPTIMIZER_ADAMW,
+                "lbfgs" : _OPTIMIZER_LBFGS,
                 },
             },
         },
@@ -608,22 +754,45 @@ _LR_SCHEDULER_ONE_CYCLE = {
 #---------------------------------------------------------------------#
 
 
+# Set the template for the learning rate scheduler's options for the
+# CosineAnnealingLR scheduler. The peak learning rate is the optimizer's
+# own 'lr'; the schedule anneals it down to 'eta_min' over the whole run
+# (one half-cosine, no restarts). 'T_max' is not an option here: it is
+# fixed to the number of steps in the run (batches for the decoder,
+# epochs for the representations) so the anneal always finishes exactly
+# at the end of training, whatever the number of epochs.
+_LR_SCHEDULER_COSINE = {
+
+    # The minimum learning rate the schedule anneals down to.
+    "eta_min" : {
+        "type": (float, int),
+        "condition": lambda v: v >= 0,
+        "message": "must be a non-negative number",
+        "default": 0.0,
+        },
+    }
+
+
+#---------------------------------------------------------------------#
+
+
 # Set the template for learning rate scheduler's options.
 _LR_SCHEDULER = {
-    
+
     # The type of learning rate scheduler to use.
     "lr_scheduler_type" : {
         "type": (str, type(None)),
-        "choices": ["one_cycle"],
+        "choices": ["one_cycle", "cosine"],
         "default": None,
         },
-    
+
     # The options for the learning rate scheduler.
     "lr_scheduler_options" : {
         "switch" : {
             "option" : "lr_scheduler_type",
             "cases" : {
                 "one_cycle": _LR_SCHEDULER_ONE_CYCLE,
+                "cosine": _LR_SCHEDULER_COSINE,
                 },
             },
         },
@@ -838,6 +1007,81 @@ _TRAIN_LGMM = {
 
     # The options for removing collapsed components.
     **_COMPONENTS_REMOVAL,
+
+    }
+
+
+#---------------------------------------------------------------------#
+
+
+# Set the template for the options for fitting the Gaussian mixture
+# model that describes the latent space after training.
+# The options for the per-sample training diagnostics.
+#
+# Optional, and off unless present: the section answers whether some
+# training samples drive the decoder more than others, which is a
+# question about the gradient rather than the loss, and the hooks that
+# measure it are cheap but not free.
+_TRAIN_DIAGNOSTICS = {
+
+    "__optional__" : True,
+
+    # Whether to record each sample's contribution to the decoder's
+    # gradient norm, once per epoch.
+    "per_sample_grad_norm" : {
+        "type": (bool,),
+        "default": False,
+        },
+
+    # Save the decoder's state every this many epochs, so that a
+    # TracIn pass can be run offline afterwards. Zero disables it.
+    "checkpoint_every" : {
+        "type": (int,),
+        "default": 0,
+        },
+
+    # Where the per-epoch records and the checkpoints are written,
+    # relative to the model's working directory.
+    "output_dir" : {
+        "type": (str,),
+        "default": "diagnostics",
+        },
+    }
+
+
+_TRAIN_GMM_FINAL = {
+
+    # A training configuration that says nothing about the final
+    # mixture is not asking for one.
+    "__optional__" : True,
+
+    # What the fit is allowed to move.
+    #
+    # 'covariance_only' freezes the means and the weights where
+    # training left them and refits only the covariance, in one
+    # closed-form M-step against the trained model's own
+    # responsibilities. Nothing iterates, so no component can drift
+    # onto a different part of the latent space, and every mapping
+    # from a component to a label - a tissue, a cancer type -
+    # established on the trained mixture stays valid.
+    #
+    # 'full_em' re-estimates the means and the weights as well. It
+    # fits the representations better and it is a different set of
+    # components: anything that labelled the old ones does not carry
+    # over.
+    "fit" : {
+        "type" : (str,),
+        "choices" : ["covariance_only", "full_em"],
+        "default" : "covariance_only",
+        },
+
+    # The maximum number of iterations, used only by 'full_em'.
+    "max_iter" : {
+        "type" : (int,),
+        "condition" : lambda v: v > 0,
+        "message" : "must be a positive integer",
+        "default" : 1000,
+        },
 
     }
 
@@ -1361,6 +1605,26 @@ _REP_TWO_OPT_LGMM = {
         "default": "sum",
         },
     
+    # A data-driven starting point for the search, replacing one of
+    # the mixture draws. Optional, and absent by default.
+    #
+    # See 'core/warmstart.py': the prediction takes the slot of a
+    # single candidate rather than being added to them, so every count
+    # the scheme assumes stays the same. The section sits on BOTH
+    # two-optimization schemes because the integration is in the shared
+    # '_get_representations_two_opt'.
+    "warm_start" : {
+
+        "__optional__" : True,
+
+        # The fitted predictor, written by
+        # 'warmstart.fit_from_model_dir'.
+        "pth_file" : {
+            "type": (str, type(None)),
+            "default": None,
+            },
+        },
+
     # The options for the first optimization of the representations.
     "optimization_1" : \
         _internals.recursive_add_items(
@@ -1420,6 +1684,26 @@ _REP_TWO_OPT_TGMM = {
             },
         },
 
+    # A data-driven starting point for the search, replacing one of
+    # the mixture draws. Optional, and absent by default.
+    #
+    # See 'core/warmstart.py': the prediction takes the slot of a
+    # single candidate rather than being added to them, so every count
+    # the scheme assumes stays the same. The section sits on BOTH
+    # two-optimization schemes because the integration is in the shared
+    # '_get_representations_two_opt'.
+    "warm_start" : {
+
+        "__optional__" : True,
+
+        # The fitted predictor, written by
+        # 'warmstart.fit_from_model_dir'.
+        "pth_file" : {
+            "type": (str, type(None)),
+            "default": None,
+            },
+        },
+
     # The options for the first optimization of the representations.
     "optimization_1" : \
         _internals.recursive_add_items(
@@ -1430,6 +1714,7 @@ _REP_TWO_OPT_TGMM = {
 
     # The options for the second optimization of the representations.
     "optimization_2" : _REP_OPTIMIZATION,
+
     
     }
 
@@ -1471,6 +1756,16 @@ CONFIG_MODEL = {
             },
         },
     
+    # The options for the Gaussian mixture model fitted to the
+    # representations after training.
+    #
+    # This section is optional, and a model without it is trained
+    # exactly as before and writes no 'gmm_final.pth'. It is a
+    # separate mixture from the one in 'latent_options': that one is
+    # the prior, it is what finding a representation for a new sample
+    # goes through, and it is not replaced.
+    "gmm_final" : _MODEL_GMM_FINAL_OPTIONS,
+
     # The options for the decoder in the model.
     "decoder_options" : _MODEL_DECODER_OPTIONS,
 
@@ -1555,9 +1850,31 @@ CONFIG_TRAIN = {
             },
         },
     
+    # The options for fitting the Gaussian mixture model that is
+    # fitted to the representations after training.
+    #
+    # What that mixture IS lives in the model's configuration, under
+    # 'gmm_final'; how it is obtained lives here. A model without a
+    # 'gmm_final' section ignores this one.
+    "gmm_final_training_options" : _TRAIN_GMM_FINAL,
+
+    # The options for the per-sample training diagnostics. Optional.
+    "training_diagnostics" : _TRAIN_DIAGNOSTICS,
+
+    # Where to write the per-epoch learning rates, indexed by epoch.
+    #
+    # Optional and absent by default. 'loss.csv' has no learning-rate
+    # column, so a schedule is otherwise recoverable only by parsing
+    # the log text - which anything needing it after the fact will
+    # quietly decline to do.
+    "output_lr_file" : {
+        "type": (str, type(None)),
+        "default": None,
+        },
+
     # The options for the decoder in the training configuration.
     "decoder_training_options" : _TRAIN_DECODER,
-    
+
     # The options for the representations in the training
     # configuration.
     "representations_training_options" : _TRAIN_REPRESENTATIONS,

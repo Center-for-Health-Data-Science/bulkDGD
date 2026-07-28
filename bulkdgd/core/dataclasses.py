@@ -94,7 +94,8 @@ class GeneExpressionDataset(object):
     def __init__(self,
                  df: pd.DataFrame,
                  labels: Optional[list[str]] = None,
-                 scaling_factor: str = "mean") -> None:
+                 scaling_factor: str = "mean",
+                 mask: Optional[torch.Tensor] = None) -> None:
         """Initialize an instance of the class.
 
         Parameters
@@ -199,6 +200,15 @@ class GeneExpressionDataset(object):
 
         #-------------------------------------------------------------#
 
+        # Which genes were actually measured. A sample only part of
+        # which was measured has no scaling factor over 'all of its
+        # genes' - the quantity is not there to be computed - so the
+        # unmeasured ones are kept out of it. Without this, they enter
+        # as the zeros they were filled with, and a median-scaled model
+        # with half its genes hidden gets a scaling factor of exactly
+        # zero, which is not a deflated answer but no answer at all.
+        self._mask = mask
+
         # Get the expression data for all samples and the
         # mean gene expression for each sample.
         self._data_exp, self._mean_exp = self._get_exp(df = df)
@@ -244,21 +254,46 @@ class GeneExpressionDataset(object):
 
         #-------------------------------------------------------------#
 
+        # Over the genes that were measured, which is all of them
+        # unless a mask says otherwise.
+        if self._mask is None:
+
+            mask = torch.ones_like(data_exp)
+
+        else:
+
+            mask = self._mask.to(dtype = data_exp.dtype,
+                                 device = data_exp.device)
+
+        n_measured = mask.sum(dim = 1, keepdim = True)
+
         # If the scaling factor is the mean.
         if self._scaling_factor == "mean":
 
-            # Get the mean gene expression for each sample.
+            # Get the mean gene expression for each sample. With a
+            # mask this is only a starting value - the optimization
+            # re-solves for the scale at every step, because the
+            # measured genes' mean is not the whole sample's unless
+            # they are a random subset of it.
             mean_exp = \
-                torch.mean(data_exp,
-                           dim = 1).unsqueeze(1)
+                ((data_exp * mask).sum(dim = 1, keepdim = True)
+                 / n_measured.clamp(min = 1.0))
 
         # If the scaling factor is the median.
         elif self._scaling_factor == "median":
 
-            # Get the median gene expression for each sample.
+            # Get the median gene expression for each sample, over the
+            # measured genes. Unmeasured ones are pushed past every
+            # measured one so that sorting cannot select them, and the
+            # lower of the two middle values is taken, which is what
+            # 'torch.median' returns when nothing is masked - the two
+            # paths must agree there.
+            sortable = data_exp.masked_fill(mask == 0.0, float("inf"))
+
+            idx = ((n_measured.long() - 1) // 2).clamp(min = 0)
+
             mean_exp = \
-                torch.median(data_exp,
-                             dim = 1).values.unsqueeze(1)
+                sortable.sort(dim = 1).values.gather(1, idx)
 
         #-------------------------------------------------------------#
 

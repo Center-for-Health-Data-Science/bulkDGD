@@ -60,6 +60,8 @@ from . import (
     latents,
     metrics,
     outputmodules,
+    traindiag,
+    warmstart,
     _util)
 
 
@@ -162,7 +164,7 @@ class BulkDGD(nn.Module):
 
 
     # Set the supported optimizers to find the representations.
-    OPTIMIZERS = ["adam", "adamw"]
+    OPTIMIZERS = ["adam", "adamw", "lbfgs"]
 
     # Set the supported Gaussian mixture model types.
     GMM_TYPES = ["lgmm", "tgmm"]
@@ -183,6 +185,7 @@ class BulkDGD(nn.Module):
                  latent_options: dict[str, object],
                  decoder_options: dict[str, object],
                  latent_type: str = "tgmm",
+                 gmm_final: Optional[dict[str, object]] = None,
                  genes_txt_file: Optional[str] = None,
                  scaling_factor: str = "mean",
                  dtype: str = "float32",
@@ -372,6 +375,22 @@ class BulkDGD(nn.Module):
             # Save the options for the latent space in the
             # model's attributes.
             self._latent_initial_options = latent_options
+
+            # The options for the final Gaussian mixture model - the
+            # one fitted to the representations after training, which
+            # is the density of the latent space rather than the prior
+            # that produced it. It sits in the model's configuration,
+            # and not only in the training one, because it decides what
+            # 'gmm_final.pth' contains, and everything downstream that
+            # reads that file is reading a property of the model.
+            #
+            # It is optional: a model that does not ask for one is
+            # trained exactly as before and writes no such file.
+            self._gmm_final_options = gmm_final
+
+            # The final mixture itself, once it has been fitted. Until
+            # then there is none, and asking for it says so.
+            self._latent_final = None
 
             # Inform the user that the latent space was set.
             info_msg = \
@@ -604,16 +623,24 @@ class BulkDGD(nn.Module):
             r_values = pd.Series(r_values,
                                  index = genes)
 
-        # If the output module is the 'nb_full_dispersion' one, one of
-        # its shrunk or tied variants, or the 'poisson' one
-        elif output_module_name in \
-                ("nb_full_dispersion", "nb_full_dispersion_shrunk",
-                 "nb_full_dispersion_tied",
-                 "nb_full_dispersion_shrunk_tied", "poisson"):
+        # Otherwise - the 'poisson' module, the 'nb_full_dispersion'
+        # one, or any of its variants that shrink or tie the per-sample
+        # dispersion
+        else:
 
             # The r-values will be None: they are predicted per sample,
             # not stored per gene, so there is no single per-gene value
             # to hand back here.
+            #
+            # This is an 'else' and not another list of module names.
+            # There were four such lists - here, the decoder's two, and
+            # the registry - and every one of them had to be edited to
+            # add a module. Three were missed, and each was found only
+            # by a job that had already run: the decoder rejected the
+            # module outright, and this one left 'r_values' unbound and
+            # raised on the line that returns it. Only the module that
+            # keeps ONE r-value per gene needs naming; everything else
+            # has none to hand back.
             r_values = None
         
         #-------------------------------------------------------------#
@@ -836,13 +863,51 @@ class BulkDGD(nn.Module):
         """Raise an exception if the user tries to modify the value
         of ``latent`` after initialization.
         """
-        
+
         err_msg = \
             "The value of 'latent' is set at initialization and  " \
             "cannot be changed. If you want to change the " \
             "latent space, initialize a new instance of " \
             f"'{self.__class__.__name__}'."
         raise ValueError(err_msg)
+
+
+    @property
+    def latent_final(self):
+        """The Gaussian mixture model fitted to the representations
+        after training - the density of the latent space, as opposed
+        to the prior that produced it.
+
+        This is ``None`` until the model has been trained with a
+        ``gmm_final`` section in its configuration. It is never the
+        prior: finding a representation for a new sample goes through
+        ``latent``, and always has.
+        """
+
+        return self._latent_final
+
+
+    @latent_final.setter
+    def latent_final(self,
+                     value):
+        """Raise an exception if the user tries to set the final
+        Gaussian mixture model by hand.
+        """
+
+        err_msg = \
+            "The value of 'latent_final' is set when the model is " \
+            "trained, from the 'gmm_final' section of its " \
+            "configuration, and cannot be set by hand."
+        raise ValueError(err_msg)
+
+
+    @property
+    def gmm_final_options(self):
+        """The options for the Gaussian mixture model fitted after
+        training, or ``None`` if the model does not ask for one.
+        """
+
+        return self._gmm_final_options
 
 
     @property
@@ -931,6 +996,21 @@ class BulkDGD(nn.Module):
                 torch.optim.AdamW(optimizer_parameters,
                                  **optimizer_options)
 
+        # If it is the L-BFGS optimizer
+        elif optimizer_type == "lbfgs":
+
+            # Set up the optimizer.
+            #
+            # Unlike the first-order optimizers above, this one needs
+            # a closure - it re-evaluates the objective several times
+            # per step while its line search walks the direction its
+            # curvature estimate picked. '_optimize_rep' provides one,
+            # and recognizes that it must by asking whether the
+            # optimizer is an L-BFGS.
+            optimizer = \
+                torch.optim.LBFGS(optimizer_parameters,
+                                  **optimizer_options)
+
         #-------------------------------------------------------------#
 
         # Return the optimizer.
@@ -1015,7 +1095,7 @@ class BulkDGD(nn.Module):
         
         # If the type of scheduler is 'one_cycle'
         if lr_scheduler_type == "one_cycle":
-        
+
             # Set the scheduler.
             lr_scheduler_opts = lr_scheduler_options.copy()
             lr_scheduler_opts.pop("enabled", None)
@@ -1026,7 +1106,25 @@ class BulkDGD(nn.Module):
                     **lr_scheduler_opts)
 
         #-------------------------------------------------------------#
-            
+
+        # If the type of scheduler is 'cosine'
+        elif lr_scheduler_type == "cosine":
+
+            # Set the scheduler. It anneals the optimizer's own learning
+            # rate down to 'eta_min' over the whole run, so 'T_max' is
+            # the number of steps the scheduler takes - one per batch for
+            # the decoder, one per epoch for the representations - the
+            # same count 'one_cycle' uses as its 'total_steps'.
+            lr_scheduler_opts = lr_scheduler_options.copy()
+            lr_scheduler_opts.pop("enabled", None)
+            lr_scheduler = \
+                torch.optim.lr_scheduler.CosineAnnealingLR(\
+                    optimizer,
+                    T_max = total_steps,
+                    **lr_scheduler_opts)
+
+        #-------------------------------------------------------------#
+
         # Return the scheduler.
         return lr_scheduler
 
@@ -1035,7 +1133,9 @@ class BulkDGD(nn.Module):
     def _get_masked_scaling_factors(obs_counts: torch.Tensor,
                                     pred_means: torch.Tensor,
                                     mask: torch.Tensor,
-                                    n_genes: int) -> torch.Tensor:
+                                    n_genes: int,
+                                    scaling_factor: str = "mean") \
+                                        -> torch.Tensor:
         """Get the scaling factor of a sample only some of whose genes
         were measured.
 
@@ -1084,7 +1184,54 @@ class BulkDGD(nn.Module):
         therefore a generalization of the unmasked one and not a rival to
         it, which is a thing worth being able to prove rather than claim:
         pass a mask of all ones and the answer must not move.
+
+        THE MEDIAN. The argument above is an argument about a sum, and a
+        median is not a sum, so it does not carry over. What carries over
+        instead is something simpler. The fill-in exists because a PANEL
+        is a biased sample of the transcriptome - a thousand genes chosen
+        for being worth measuring are not a thousand genes drawn at
+        random, and neither their mean nor their median estimates the
+        whole sample's. But when the unmeasured genes are MISSING AT
+        RANDOM, the measured ones are a uniform subsample, and their
+        median estimates the median over all the genes directly, with no
+        model and no equation to solve.
+
+        So that is what is returned for a median-scaled model, and the
+        condition attaches to it: **the mask must be random**. For a
+        targeted panel it is biased, in the same direction and for the
+        same reason the naive mean would be.
+
+        It was worth checking rather than assuming, because the tempting
+        alternative is wrong. Requiring 's' to be the median of the
+        completed vector - the exact analogue of the equation the mean
+        solves - has a closed-form solution ('s * pred_g <= s' is just
+        'pred_g <= 1', so the unmeasured genes contribute a count that
+        does not depend on 's' and the answer is an order statistic of
+        the measured counts). It is elegant and it is biased by about
+        20% low, because it fills the unmeasured half with noiseless
+        expectations, and a median is moved by noise where a mean is not.
+        Under a random mask the naive median lands on the unmasked one to
+        within a count or two; that self-consistent one does not.
         """
+
+        # If the scaling factor is the median.
+        if scaling_factor == "median":
+
+            # Put the unmeasured genes beyond every measured one, so
+            # that sorting leaves them all at the end and they cannot be
+            # selected.
+            sortable = obs_counts.masked_fill(mask == 0.0, float("inf"))
+
+            n_measured = mask.sum(dim = -1, keepdim = True).long()
+
+            # The lower of the two middle values when the count is even,
+            # which is what 'torch.median' returns for the unmasked
+            # sample - the two paths must agree when nothing is masked.
+            idx = ((n_measured - 1) // 2).clamp(min = 0)
+
+            return sortable.sort(dim = -1).values.gather(-1, idx)
+
+        #-------------------------------------------------------------#
 
         obs_measured = (obs_counts * mask).sum(dim = -1, keepdim = True)
 
@@ -1259,155 +1406,207 @@ class BulkDGD(nn.Module):
             # Mark the wall clock start time of the epoch.
             time_start_epoch_wall = time.time()
 
-            # Initialize the total CPU time needed to perform the
-            # backward step to zero.
+            # Declared here so that the closure below can rebind
+            # them: a nonlocal name has to exist in the enclosing
+            # scope first.
             time_tot_bw_cpu = 0.0
-
-            # Initialize the total wall-clock time needed to perform
-            # the backward step to zero.
             time_tot_bw_wall = 0.0
-
-            # Make the optimizer's gradients zero.
-            optimizer.zero_grad()
-
-            # Initialize the loss for the current epoch to 0.0.
             rep_avg_loss_epoch = 0.0
 
-            # For each batch of samples, the mean gene expression
-            # in the samples in the batch, and the unique indexes
-            # of the samples in the batch
-            for samples_exp, samples_mean_exp, samples_ixs \
-                in data_loader:
+            # Everything the epoch does to the loss, as a closure.
+            #
+            # L-BFGS needs one: it probes the objective several times
+            # per step, along the direction its curvature estimate
+            # picked, and each probe has to re-evaluate the loss AND
+            # its gradient at a new point. A first-order optimizer
+            # never asks twice, which is why the loop could be written
+            # inline before.
+            #
+            # The three totals below are re-initialized inside, not
+            # outside, because a probe that reused them would add its
+            # timings and its loss to the previous probe's.
+            def closure():
 
-                # Get the number of samples in the batch.
-                n_samples_in_batch = len(samples_ixs)
+                nonlocal time_tot_bw_cpu, time_tot_bw_wall
+                nonlocal rep_avg_loss_epoch
 
-                #-----------------------------------------------------#
+                # Initialize the total CPU time needed to perform the
+                # backward step to zero.
+                time_tot_bw_cpu = 0.0
 
-                # Move the gene expression of the samples to the
-                # correct device.
-                samples_exp = samples_exp.to(self.device)
+                # Initialize the total wall-clock time needed to
+                # perform the backward step to zero.
+                time_tot_bw_wall = 0.0
 
-                # Move the mean gene expression of the samples to
-                # the correct device.
-                samples_mean_exp = samples_mean_exp.to(self.device)
+                # Make the optimizer's gradients zero.
+                optimizer.zero_grad()
 
-                #-----------------------------------------------------#
+                # Initialize the loss for the current epoch to 0.0.
+                rep_avg_loss_epoch = 0.0
 
-                # Get the representations' values from the
-                # representation layer.
-                # 
-                # The representations are stored in a 2D tensor with:
-                #
-                # - 1st dimension:
-                #       the total number of samples times the number of
-                #       components in the Gaussian mixture model times
-                #       the number of representations taken per
-                #       component per sample
-                #
-                # - 2nd dimension:
-                #       the dimensionality of the Gaussian mixture
-                #       model
-                z_all = rep_layer()
+                # For each batch of samples, the mean gene expression
+                # in the samples in the batch, and the unique indexes
+                # of the samples in the batch
+                for samples_exp, samples_mean_exp, samples_ixs \
+                    in data_loader:
 
-                #-----------------------------------------------------#
+                    # Get the number of samples in the batch.
+                    n_samples_in_batch = len(samples_ixs)
 
-                # Reshape the tensor containing the representations.
-                #
-                # The output is a 4D tensor with:
-                #
-                # - 1st dimension:
-                #       the total number of samples
-                # 
-                # - 2nd dimension:
-                #       the number of representations taken per
-                #        component per sample
-                #
-                # - 3rd dimension:
-                #       the number of components in the Gaussian
-                #       mixture model
-                #
-                # - 4th dimension:
-                #       the dimensionality of the Gaussian mixture
-                #       model
-                z_4d = z_all.view(n_samples,
-                                  n_rep_per_comp,
-                                  n_components,
-                                  dim)[samples_ixs]
+                    #-----------------------------------------------------#
 
-                # Reshape the tensor again.
-                #
-                # The output is a 2D tensor with:
-                #
-                # - 1st dimension:
-                #       the number of samples in the current
-                #       batch times the number of components
-                #       in the Gaussian mixture model times
-                #       the number of representations taken
-                #       per component per sample
-                #
-                # - 2nd dimension:
-                #       the dimensionality of the Gaussian mixture
-                #       model
-                z = z_4d.view(n_samples_in_batch * \
-                                n_rep_per_comp * \
-                                n_components,
-                              dim)
+                    # Move the gene expression of the samples to the
+                    # correct device.
+                    samples_exp = samples_exp.to(self.device)
 
-                #-----------------------------------------------------#
+                    # Move the mean gene expression of the samples to
+                    # the correct device.
+                    samples_mean_exp = samples_mean_exp.to(self.device)
 
-                # If the chosen output module means that the r-values
-                # are not learned
-                if isinstance(\
-                    self.decoder.nb,
-                    (outputmodules.OutputModuleNBFeatureDispersion,
-                     outputmodules.OutputModulePoisson)):
-                    
-                    # Get the predicted scaled means of the
-                    # distributions modelling the genes' counts.
+                    #-----------------------------------------------------#
+
+                    # Get the representations' values from the
+                    # representation layer.
+                    # 
+                    # The representations are stored in a 2D tensor with:
+                    #
+                    # - 1st dimension:
+                    #       the total number of samples times the number of
+                    #       components in the Gaussian mixture model times
+                    #       the number of representations taken per
+                    #       component per sample
+                    #
+                    # - 2nd dimension:
+                    #       the dimensionality of the Gaussian mixture
+                    #       model
+                    z_all = rep_layer()
+
+                    #-----------------------------------------------------#
+
+                    # Reshape the tensor containing the representations.
+                    #
+                    # The output is a 4D tensor with:
+                    #
+                    # - 1st dimension:
+                    #       the total number of samples
+                    # 
+                    # - 2nd dimension:
+                    #       the number of representations taken per
+                    #        component per sample
+                    #
+                    # - 3rd dimension:
+                    #       the number of components in the Gaussian
+                    #       mixture model
+                    #
+                    # - 4th dimension:
+                    #       the dimensionality of the Gaussian mixture
+                    #       model
+                    z_4d = z_all.view(n_samples,
+                                      n_rep_per_comp,
+                                      n_components,
+                                      dim)[samples_ixs]
+
+                    # Reshape the tensor again.
                     #
                     # The output is a 2D tensor with:
                     #
                     # - 1st dimension:
-                    #       the number of samples in the current batch
-                    #       times the number of components in the
-                    #       Gaussian mixture model times the number of
-                    #       representations taken per component per
-                    #       sample
+                    #       the number of samples in the current
+                    #       batch times the number of components
+                    #       in the Gaussian mixture model times
+                    #       the number of representations taken
+                    #       per component per sample
                     #
                     # - 2nd dimension:
-                    #       the dimensionality of the output (= gene)
-                    #       space
-                    pred_means = self.decoder(z = z)
+                    #       the dimensionality of the Gaussian mixture
+                    #       model
+                    z = z_4d.view(n_samples_in_batch * \
+                                    n_rep_per_comp * \
+                                    n_components,
+                                  dim)
 
-                # If the chosen output module means that the r-values
-                # are learned
-                elif isinstance(\
-                    self.decoder.nb,
-                    outputmodules.OutputModuleNBFullDispersion):
+                    #-----------------------------------------------------#
 
-                    # Get the predicted scaled means and r-values
-                    # of the negative binomial distributions modelling
-                    # the genes' counts.
-                    #
-                    # Both outputs are 2D tensors with:
-                    #
-                    # - 1st dimension:
-                    #       the number of samples in the current batch
-                    #       times the number of components in the
-                    #       Gaussian mixture model times the number of
-                    #       representations taken per component per
-                    #       sample
-                    #
-                    # - 2nd dimension:
-                    #       the dimensionality of the output (= gene)
-                    #       space
-                    pred_means, pred_log_r_values = self.decoder(z = z)
+                    # If the chosen output module means that the r-values
+                    # are not learned
+                    if isinstance(\
+                        self.decoder.nb,
+                        (outputmodules.OutputModuleNBFeatureDispersion,
+                         outputmodules.OutputModulePoisson)):
+                    
+                        # Get the predicted scaled means of the
+                        # distributions modelling the genes' counts.
+                        #
+                        # The output is a 2D tensor with:
+                        #
+                        # - 1st dimension:
+                        #       the number of samples in the current batch
+                        #       times the number of components in the
+                        #       Gaussian mixture model times the number of
+                        #       representations taken per component per
+                        #       sample
+                        #
+                        # - 2nd dimension:
+                        #       the dimensionality of the output (= gene)
+                        #       space
+                        pred_means = self.decoder(z = z)
 
-                    # Reshape the predicted r-values to match the shape
-                    # required to compute the loss.
+                    # If the chosen output module means that the r-values
+                    # are learned
+                    elif isinstance(\
+                        self.decoder.nb,
+                        outputmodules.OutputModuleNBFullDispersion):
+
+                        # Get the predicted scaled means and r-values
+                        # of the negative binomial distributions modelling
+                        # the genes' counts.
+                        #
+                        # Both outputs are 2D tensors with:
+                        #
+                        # - 1st dimension:
+                        #       the number of samples in the current batch
+                        #       times the number of components in the
+                        #       Gaussian mixture model times the number of
+                        #       representations taken per component per
+                        #       sample
+                        #
+                        # - 2nd dimension:
+                        #       the dimensionality of the output (= gene)
+                        #       space
+                        pred_means, pred_log_r_values = self.decoder(z = z)
+
+                        # Reshape the predicted r-values to match the shape
+                        # required to compute the loss.
+                        #
+                        # The output is a 4D tensor with:   
+                        #
+                        # - 1st dimension:
+                        #       the number of samples in the current batch
+                        #
+                        # - 2nd dimension:
+                        #       the number of representations taken per
+                        #       component per sample
+                        #
+                        # - 3rd dimension:
+                        #       the number of components in the Gaussian
+                        #       mixture model
+                        #
+                        # - 4th dimension:
+                        #       the dimensionality of the output (= gene)
+                        #       space
+                        pred_log_r_values = \
+                            pred_log_r_values.view(n_samples_in_batch,
+                                                   n_rep_per_comp,
+                                                   n_components,
+                                                   n_genes)
+
+                    #-----------------------------------------------------#
+
+                    # Get the observed gene expression and "expand" the
+                    # resulting tensor to match the shape required to
+                    # compute the reconstruction loss.
                     #
-                    # The output is a 4D tensor with:   
+                    # The output is a 4D tensor with:
                     #
                     # - 1st dimension:
                     #       the number of samples in the current batch
@@ -1423,337 +1622,334 @@ class BulkDGD(nn.Module):
                     # - 4th dimension:
                     #       the dimensionality of the output (= gene)
                     #       space
-                    pred_log_r_values = \
-                        pred_log_r_values.view(n_samples_in_batch,
-                                               n_rep_per_comp,
-                                               n_components,
-                                               n_genes)
+                    obs_counts = \
+                        samples_exp.unsqueeze(1).unsqueeze(1).expand(\
+                            -1,
+                            n_rep_per_comp,
+                            n_components,
+                            -1)
 
-                #-----------------------------------------------------#
+                    #-----------------------------------------------------#
 
-                # Get the observed gene expression and "expand" the
-                # resulting tensor to match the shape required to
-                # compute the reconstruction loss.
-                #
-                # The output is a 4D tensor with:
-                #
-                # - 1st dimension:
-                #       the number of samples in the current batch
-                #
-                # - 2nd dimension:
-                #       the number of representations taken per
-                #       component per sample
-                #
-                # - 3rd dimension:
-                #       the number of components in the Gaussian
-                #       mixture model
-                #
-                # - 4th dimension:
-                #       the dimensionality of the output (= gene)
-                #       space
-                obs_counts = \
-                    samples_exp.unsqueeze(1).unsqueeze(1).expand(\
-                        -1,
-                        n_rep_per_comp,
-                        n_components,
-                        -1)
-
-                #-----------------------------------------------------#
-
-                # Get the scaling factors for the mean of each negative
-                # binomial modelling the expression of a gene and
-                # reshape it so that it matches the shape required to
-                # compute the reconstruction loss.
-                #
-                # The output is a 4D tensor with:
-                #
-                # - 1st dimension:
-                #       the number of samples in the current batch
-                #
-                # - 2nd dimension: 1
-                #
-                # - 3rd dimension: 1
-                #
-                # - 4th dimension: 1
-                scaling_factors = \
-                    decoders.reshape_scaling_factors(samples_mean_exp,
-                                                     4)
-
-                #-----------------------------------------------------#
-
-                # The mask of the samples in this batch, if there is
-                # one, shaped so that it broadcasts over the
-                # representations and the components.
-                mask_batch = \
-                    genes_mask[samples_ixs].unsqueeze(1).unsqueeze(1) \
-                        if genes_mask is not None else None
-
-                #-----------------------------------------------------#
-
-                # Reshape the predicted scaled means to match the
-                # shape required to compute the loss.
-                #
-                # The output is a 4D tensor with:
-                #
-                # - 1st dimension:
-                #       the number of samples in the current batch
-                #
-                # - 2nd dimension:
-                #       the number of representations taken per
-                #       component per sample
-                #
-                # - 3rd dimension:
-                #       the number of components in the Gaussian
-                #       mixture model
-                #
-                # - 4th dimension:
-                #       the dimensionality of the output (= gene)
-                #       space
-                pred_means = pred_means.view(n_samples_in_batch,
-                                             n_rep_per_comp,
-                                             n_components,
-                                             n_genes)
-
-                #-----------------------------------------------------#
-
-                # If only some of the genes were measured, the scaling
-                # factor cannot be the mean over all of them.
-                #
-                # 'samples_mean_exp' is the mean count over EVERY gene
-                # of the sample, and the unmeasured genes enter it as
-                # zeros. A thousand-gene panel of a fourteen-thousand
-                # gene model would therefore be scaled by about a
-                # fourteenth of what it should be, and every predicted
-                # mean - of the genes that WERE measured as much as of
-                # the genes that were not - would come out that much too
-                # small. Masking the loss alone does not save it: the
-                # scale is wrong for the genes that are still in the
-                # loss.
-                #
-                # So the factor is estimated where the data still is:
-                # the one that makes the predicted total over the
-                # MEASURED genes equal the observed total over those
-                # same genes. It uses nothing the model was not given,
-                # it is one sum, and it is exact. It is re-estimated at
-                # every step, because 'pred_means' moves at every step.
-                if mask_batch is not None:
-
+                    # Get the scaling factors for the mean of each negative
+                    # binomial modelling the expression of a gene and
+                    # reshape it so that it matches the shape required to
+                    # compute the reconstruction loss.
+                    #
+                    # The output is a 4D tensor with:
+                    #
+                    # - 1st dimension:
+                    #       the number of samples in the current batch
+                    #
+                    # - 2nd dimension: 1
+                    #
+                    # - 3rd dimension: 1
+                    #
+                    # - 4th dimension: 1
                     scaling_factors = \
-                        self.__class__._get_masked_scaling_factors(
-                            obs_counts = obs_counts,
-                            pred_means = pred_means,
-                            mask = mask_batch,
-                            n_genes = n_genes)
+                        decoders.reshape_scaling_factors(samples_mean_exp,
+                                                         4)
 
-                #-----------------------------------------------------#
+                    #-----------------------------------------------------#
 
-                # If the chosen output module means that the r-values
-                # are not learned
-                if isinstance(\
-                    self.decoder.nb,
-                    (outputmodules.OutputModuleNBFeatureDispersion,
-                     outputmodules.OutputModulePoisson)):
+                    # The mask of the samples in this batch, if there is
+                    # one, shaped so that it broadcasts over the
+                    # representations and the components.
+                    mask_batch = \
+                        genes_mask[samples_ixs].unsqueeze(1).unsqueeze(1) \
+                            if genes_mask is not None else None
 
-                    # Set the options to compute the reconstruction
-                    # loss.
-                    recon_loss_options = \
-                        {"obs_counts" : obs_counts,
-                         "pred_means" : pred_means,
-                         "scaling_factors" : scaling_factors}
+                    #-----------------------------------------------------#
 
-                # If the chosen output module means that the r-values
-                # are learned
-                elif isinstance(\
-                    self.decoder.nb,
-                    outputmodules.OutputModuleNBFullDispersion):
-
-                    # Set the options to compute the reconstruction
-                    # loss.
-                    recon_loss_options = \
-                        {"obs_counts" : obs_counts,
-                         "pred_means" : pred_means,
-                         "pred_log_r_values" : pred_log_r_values,
-                         "scaling_factors" : scaling_factors}
-
-                # Bound what a gene the model cannot reach is allowed to
-                # do to the representation. Off unless asked for; see
-                # 'OutputModuleNBFullDispersion.loss' for why it belongs
-                # here and not in training.
-                if contamination:
-
-                    recon_loss_options["contamination"] = contamination
-
-                    recon_loss_options["contamination_r"] = \
-                        contamination_r
-
-                # Get the reconstruction loss.
-                #
-                # The output is a 4D tensor with:
-                #
-                # - 1st dimension:
-                #       the number of samples in the current batch
-                # 
-                # - 2nd dimension:
-                #       the number of representations taken per
-                #       component per sample
-                #
-                # - 3rd dimension:
-                #       the number of components in the Gaussian
-                #       mixture model
-                #
-                # - 4th dimension:
-                #       the dimensionality of the output (= gene)
-                #       space
-                recon_loss = self.decoder.nb.loss(**recon_loss_options)
-
-                #-----------------------------------------------------#
-
-                # Take out the genes that were not measured.
-                #
-                # The loss comes back one value to a gene, and is only
-                # reduced below - so a gene is removed from the
-                # objective by zeroing its term, which is what
-                # marginalizing it out of a factorized likelihood
-                # amounts to. It is not a trick: the posterior over the
-                # representation given SOME of the genes is exactly the
-                # posterior with the other genes' terms absent.
-                #
-                # Without this, an unmeasured gene reads as a gene
-                # measured to be OFF, and the model will move the
-                # representation in order to explain a silence that was
-                # never observed.
-                if mask_batch is not None:
-
-                    recon_loss = recon_loss * mask_batch
-
-                #-----------------------------------------------------#
-
-                # If the reduction method is 'sum'
-                if loss_reduction_type == "sum":
-
-                    # Get the total reconstruction loss by summing all
-                    # values in the 'recon_loss' tensor.
+                    # Reshape the predicted scaled means to match the
+                    # shape required to compute the loss.
                     #
-                    # The output is a tensor containing a single value.
-                    recon_loss_final = recon_loss.sum().clone()
-                
-                # If the reduction method is 'mean'
-                elif loss_reduction_type == "mean":
-
-                    # Get the total reconstruction loss by averaging
-                    # all values in the 'recon_loss' tensor.
+                    # The output is a 4D tensor with:
                     #
-                    # The output is a tensor containing a single value.
-                    recon_loss_final = recon_loss.mean().clone()
+                    # - 1st dimension:
+                    #       the number of samples in the current batch
+                    #
+                    # - 2nd dimension:
+                    #       the number of representations taken per
+                    #       component per sample
+                    #
+                    # - 3rd dimension:
+                    #       the number of components in the Gaussian
+                    #       mixture model
+                    #
+                    # - 4th dimension:
+                    #       the dimensionality of the output (= gene)
+                    #       space
+                    pred_means = pred_means.view(n_samples_in_batch,
+                                                 n_rep_per_comp,
+                                                 n_components,
+                                                 n_genes)
 
-                #-----------------------------------------------------#
+                    #-----------------------------------------------------#
 
-                # If the latent space is the legacy Gaussian mixture
-                # model
-                if isinstance(self.latent,
-                              latents.GaussianMixtureModelLegacy):
-                    
+                    # If only some of the genes were measured, the scaling
+                    # factor cannot be the mean over all of them.
+                    #
+                    # 'samples_mean_exp' is the mean count over EVERY gene
+                    # of the sample, and the unmeasured genes enter it as
+                    # zeros. A thousand-gene panel of a fourteen-thousand
+                    # gene model would therefore be scaled by about a
+                    # fourteenth of what it should be, and every predicted
+                    # mean - of the genes that WERE measured as much as of
+                    # the genes that were not - would come out that much too
+                    # small. Masking the loss alone does not save it: the
+                    # scale is wrong for the genes that are still in the
+                    # loss.
+                    #
+                    # So the factor is estimated where the data still is:
+                    # the one that makes the predicted total over the
+                    # MEASURED genes equal the observed total over those
+                    # same genes. It uses nothing the model was not given,
+                    # it is one sum, and it is exact. It is re-estimated at
+                    # every step, because 'pred_means' moves at every step.
+                    if mask_batch is not None:
+
+                        scaling_factors = \
+                            self.__class__._get_masked_scaling_factors(
+                                obs_counts = obs_counts,
+                                pred_means = pred_means,
+                                mask = mask_batch,
+                                n_genes = n_genes,
+                                scaling_factor = self._scaling_factor)
+
+                    #-----------------------------------------------------#
+
+                    # If the chosen output module means that the r-values
+                    # are not learned
+                    if isinstance(\
+                        self.decoder.nb,
+                        (outputmodules.OutputModuleNBFeatureDispersion,
+                         outputmodules.OutputModulePoisson)):
+
+                        # Set the options to compute the reconstruction
+                        # loss.
+                        recon_loss_options = \
+                            {"obs_counts" : obs_counts,
+                             "pred_means" : pred_means,
+                             "scaling_factors" : scaling_factors}
+
+                    # If the chosen output module means that the r-values
+                    # are learned
+                    elif isinstance(\
+                        self.decoder.nb,
+                        outputmodules.OutputModuleNBFullDispersion):
+
+                        # Set the options to compute the reconstruction
+                        # loss.
+                        recon_loss_options = \
+                            {"obs_counts" : obs_counts,
+                             "pred_means" : pred_means,
+                             "pred_log_r_values" : pred_log_r_values,
+                             "scaling_factors" : scaling_factors}
+
+                    # Bound what a gene the model cannot reach is allowed to
+                    # do to the representation. Off unless asked for; see
+                    # 'OutputModuleNBFullDispersion.loss' for why it belongs
+                    # here and not in training.
+                    if contamination:
+
+                        recon_loss_options["contamination"] = contamination
+
+                        recon_loss_options["contamination_r"] = \
+                            contamination_r
+
+                    # Get the reconstruction loss.
+                    #
+                    # The output is a 4D tensor with:
+                    #
+                    # - 1st dimension:
+                    #       the number of samples in the current batch
+                    # 
+                    # - 2nd dimension:
+                    #       the number of representations taken per
+                    #       component per sample
+                    #
+                    # - 3rd dimension:
+                    #       the number of components in the Gaussian
+                    #       mixture model
+                    #
+                    # - 4th dimension:
+                    #       the dimensionality of the output (= gene)
+                    #       space
+                    recon_loss = self.decoder.nb.loss(**recon_loss_options)
+
+                    #-----------------------------------------------------#
+
+                    # Take out the genes that were not measured.
+                    #
+                    # The loss comes back one value to a gene, and is only
+                    # reduced below - so a gene is removed from the
+                    # objective by zeroing its term, which is what
+                    # marginalizing it out of a factorized likelihood
+                    # amounts to. It is not a trick: the posterior over the
+                    # representation given SOME of the genes is exactly the
+                    # posterior with the other genes' terms absent.
+                    #
+                    # Without this, an unmeasured gene reads as a gene
+                    # measured to be OFF, and the model will move the
+                    # representation in order to explain a silence that was
+                    # never observed.
+                    if mask_batch is not None:
+
+                        recon_loss = recon_loss * mask_batch
+
+                    #-----------------------------------------------------#
+
                     # If the reduction method is 'sum'
                     if loss_reduction_type == "sum":
 
-                        # Get the loss.
-                        latent_loss_final = \
-                            self.latent(x = z).sum().clone()
-                    
-                    # If the reduction method is 'mean'
-                    elif loss_reduction_type == "mean": 
-
-                        # Get the loss.
-                        latent_loss_final = \
-                            self.latent(x = z).mean().clone()
+                        # Get the total reconstruction loss by summing all
+                        # values in the 'recon_loss' tensor.
+                        #
+                        # The output is a tensor containing a single value.
+                        recon_loss_final = recon_loss.sum().clone()
                 
-                # If the latent space is the TorchGMM wrapper
-                elif isinstance(self.latent,
-                                latents.GaussianMixtureModelTGMM):
-                    
-                    # If the reduction method is 'sum'
-                    if loss_reduction_type == "sum":
-
-                        # Get the loss.
-                        latent_loss_final = \
-                            - latent_lambda * \
-                                torch.sum(\
-                                    self.latent.log_prob(z))
-                    
                     # If the reduction method is 'mean'
                     elif loss_reduction_type == "mean":
 
-                        # Get the loss.
-                        latent_loss_final = \
-                            - latent_lambda * \
-                                torch.mean(\
-                                    self.latent.log_prob(z))
+                        # Get the total reconstruction loss by averaging
+                        # all values in the 'recon_loss' tensor.
+                        #
+                        # The output is a tensor containing a single value.
+                        recon_loss_final = recon_loss.mean().clone()
 
-                #-----------------------------------------------------#
+                    #-----------------------------------------------------#
 
-                # The dispersion regularization the output module asks
-                # for. It is zero for every module but the ones that
-                # shrink the per-sample dispersion toward a per-gene, or
-                # a mean-trend, baseline - for those it is the size of
-                # the deviation, reduced the same way the reconstruction
-                # loss was so that the two are on the same scale.
-                dispersion_reg = \
-                    self.decoder.nb.dispersion_regularization(
-                        pred_means = pred_means,
-                        pred_log_r_values = pred_log_r_values,
-                        reduction = loss_reduction_type)
+                    # If the latent space is the legacy Gaussian mixture
+                    # model
+                    if isinstance(self.latent,
+                                  latents.GaussianMixtureModelLegacy):
+                    
+                        # If the reduction method is 'sum'
+                        if loss_reduction_type == "sum":
 
-                #-----------------------------------------------------#
+                            # Get the loss.
+                            latent_loss_final = \
+                                self.latent(x = z).sum().clone()
+                    
+                        # If the reduction method is 'mean'
+                        elif loss_reduction_type == "mean": 
 
-                # Get the total loss by summing the reconstruction loss,
-                # the loss of the latent space, and the dispersion
-                # regularization.
-                #
-                # The output is a tensor containing a single value.
-                total_loss = \
-                    recon_loss_final + latent_loss_final + dispersion_reg
+                            # Get the loss.
+                            latent_loss_final = \
+                                self.latent(x = z).mean().clone()
+                
+                    # If the latent space is the TorchGMM wrapper
+                    elif isinstance(self.latent,
+                                    latents.GaussianMixtureModelTGMM):
+                    
+                        # If the reduction method is 'sum'
+                        if loss_reduction_type == "sum":
 
-                #-----------------------------------------------------#
+                            # Get the loss.
+                            latent_loss_final = \
+                                - latent_lambda * \
+                                    torch.sum(\
+                                        self.latent.log_prob(z))
+                    
+                        # If the reduction method is 'mean'
+                        elif loss_reduction_type == "mean":
 
-                # Mark the CPU start time of the backward step.
-                time_start_bw_cpu = time.process_time()
+                            # Get the loss.
+                            latent_loss_final = \
+                                - latent_lambda * \
+                                    torch.mean(\
+                                        self.latent.log_prob(z))
 
-                # Mark the wall clock start time of the backward step.
-                time_start_bw_wall = time.time()
+                    #-----------------------------------------------------#
 
-                # Propagate the loss backward.
-                total_loss.backward()
+                    # The dispersion regularization the output module asks
+                    # for. It is zero for every module but the ones that
+                    # shrink the per-sample dispersion toward a per-gene, or
+                    # a mean-trend, baseline - for those it is the size of
+                    # the deviation, reduced the same way the reconstruction
+                    # loss was so that the two are on the same scale.
+                    dispersion_reg = \
+                        self.decoder.nb.dispersion_regularization(
+                            pred_means = pred_means,
+                            pred_log_r_values = pred_log_r_values,
+                            reduction = loss_reduction_type)
 
-                # Mark the end CPU time of the backward step.
-                time_end_bw_cpu = time.process_time()
+                    #-----------------------------------------------------#
 
-                # Mark the wall clock end time of the backward step.
-                time_end_bw_wall = time.time()
+                    # Get the total loss by summing the reconstruction loss,
+                    # the loss of the latent space, and the dispersion
+                    # regularization.
+                    #
+                    # The output is a tensor containing a single value.
+                    total_loss = \
+                        recon_loss_final + latent_loss_final + dispersion_reg
 
-                # Get the total CPU time used by the backward step.
-                time_tot_bw_cpu += \
-                    time_end_bw_cpu - time_start_bw_cpu
+                    #-----------------------------------------------------#
 
-                # Get the total wall clock time used by the backward
-                # step.
-                time_tot_bw_wall += \
-                    time_end_bw_wall - time_start_bw_wall
+                    # Mark the CPU start time of the backward step.
+                    time_start_bw_cpu = time.process_time()
 
-                #-----------------------------------------------------#
+                    # Mark the wall clock start time of the backward step.
+                    time_start_bw_wall = time.time()
 
-                # Update the average loss for the current epoch.
-                rep_avg_loss_epoch += \
-                    _util.normalize_loss(\
-                        loss = total_loss.item(),
-                        loss_type = "total",
-                        loss_norm_type = loss_norm_type,
-                        loss_norm_options = {"n_samples" : n_samples,
-                                             "n_genes" : n_genes})
+                    # Propagate the loss backward.
+                    total_loss.backward()
+
+                    # Mark the end CPU time of the backward step.
+                    time_end_bw_cpu = time.process_time()
+
+                    # Mark the wall clock end time of the backward step.
+                    time_end_bw_wall = time.time()
+
+                    # Get the total CPU time used by the backward step.
+                    time_tot_bw_cpu += \
+                        time_end_bw_cpu - time_start_bw_cpu
+
+                    # Get the total wall clock time used by the backward
+                    # step.
+                    time_tot_bw_wall += \
+                        time_end_bw_wall - time_start_bw_wall
+
+                    #-----------------------------------------------------#
+
+                    # Update the average loss for the current epoch.
+                    rep_avg_loss_epoch += \
+                        _util.normalize_loss(\
+                            loss = total_loss.item(),
+                            loss_type = "total",
+                            loss_norm_type = loss_norm_type,
+                            loss_norm_options = {"n_samples" : n_samples,
+                                                 "n_genes" : n_genes})
+
+                # Hand the epoch's loss back to the optimizer, which
+                # is what a line search compares.
+                return rep_avg_loss_epoch
 
             #---------------------------------------------------------#
 
             # Take an optimization step.
-            optimizer.step()
+            #
+            # L-BFGS drives the closure itself, since only it knows
+            # how many probes its line search needs. Every other
+            # optimizer is given one evaluation and then steps on the
+            # gradients that evaluation left behind.
+            #
+            # Asked of the optimizer rather than of a name passed in:
+            # the object already knows what it is, and a second copy of
+            # that knowledge in the signature is a second thing to keep
+            # in step.
+            if isinstance(optimizer, torch.optim.LBFGS):
+
+                optimizer.step(closure)
+
+            # If it is any other optimizer
+            else:
+
+                closure()
+
+                optimizer.step()
+
 
             #---------------------------------------------------------#
 
@@ -2188,7 +2384,8 @@ class BulkDGD(nn.Module):
                         obs_counts = obs_counts,
                         pred_means = pred_means,
                         mask = mask_batch,
-                        n_genes = n_genes)
+                        n_genes = n_genes,
+                        scaling_factor = self._scaling_factor)
 
             #---------------------------------------------------------#
 
@@ -2370,6 +2567,7 @@ class BulkDGD(nn.Module):
                 total_loss.view(n_samples_in_batch,
                                 n_rep_per_comp * n_components)
 
+
             #---------------------------------------------------------#
 
             # Get the best representation for each sample in the
@@ -2465,6 +2663,8 @@ class BulkDGD(nn.Module):
                          "arrived_in" : arrived.detach().cpu().clone(),
                          "winner" :
                             best_rep_per_sample.detach().cpu().clone()})
+
+        #-------------------------------------------------------------#
 
         #-------------------------------------------------------------#
 
@@ -2997,6 +3197,46 @@ class BulkDGD(nn.Module):
                 component_samples.reshape(
                     n_samples * n_rep_per_comp * n_components,
                     n_dim)
+
+        #-------------------------------------------------------------#
+
+        # Seed the search with a data-driven starting point, if one was
+        # asked for.
+        #
+        # The prediction TAKES THE SLOT of a single mixture draw rather
+        # than being added as an extra candidate. That is deliberate:
+        # the number of candidates per sample, 'n_rep_per_comp' *
+        # 'n_components', is assumed in seven separate places
+        # downstream - every reshape and every argmin - and changing it
+        # would mean propagating arithmetic to all of them. Overwriting
+        # one slot leaves every count identical.
+        #
+        # Trading one draw of forty-eight for the ridge is favourable
+        # by RESULTS Sec.40.2: the ridge beats a random draw about half
+        # the time, so the winner can only improve, and the cost is one
+        # draw the competition would probably not have kept.
+        warm_start_cfg = \
+            config.get("scheme_options", {}).get("warm_start") or {}
+
+        if warm_start_cfg.get("pth_file"):
+
+            ws = warmstart.RidgeWarmStart.from_file(
+                warm_start_cfg["pth_file"])
+
+            z_ws = ws.predict(dataset.data_exp.cpu().numpy(),
+                              device = rep_init.device).to(rep_init.dtype)
+
+            n_cand = n_rep_per_comp * n_components
+
+            rep_init = rep_init.view(n_samples, n_cand, n_dim)
+            rep_init[:, 0, :] = z_ws
+            rep_init = rep_init.reshape(n_samples * n_cand, n_dim)
+
+            logger.info(
+                f"The ridge warm start from "
+                f"'{warm_start_cfg['pth_file']}' replaced one of the "
+                f"{n_cand} candidates of each sample. The other "
+                f"{n_cand - 1} are drawn from the mixture as usual.")
 
         #-------------------------------------------------------------#
 
@@ -4996,6 +5236,33 @@ class BulkDGD(nn.Module):
 
         #-------------------------------------------------------------#
 
+        # Set up the per-sample training diagnostics, if they were
+        # asked for.
+        #
+        # They answer whether some samples drive the model more than
+        # others, and they are off unless a 'training_diagnostics'
+        # section says otherwise - the hooks are cheap but not free,
+        # and a diagnostic that is always on is a diagnostic nobody
+        # reads.
+        config_diag = config_train.get("training_diagnostics") or {}
+
+        # Where to write the per-epoch learning rates, if anywhere.
+        output_lr_file = config_train.get("output_lr_file")
+
+        lrs_list = []
+
+        diagnostics_train = \
+            traindiag.TrainingDiagnostics(
+                decoder = self.decoder,
+                output_dir = config_diag.get("output_dir",
+                                             "diagnostics"),
+                n_samples = len(samples_names_train),
+                checkpoint_every = config_diag.get("checkpoint_every", 0),
+                device = self.device) \
+            if config_diag.get("per_sample_grad_norm") else None
+
+        #-------------------------------------------------------------#
+
         # For each epoch
         for epoch in range(1, n_epochs + 1):
 
@@ -5265,6 +5532,15 @@ class BulkDGD(nn.Module):
                 # Get the representations for the current samples.
                 z = rep_layer_train(ixs = samples_ixs).to(self.device)
 
+                # Keep this tensor's gradient, if the diagnostics want
+                # it. 'z' is not a leaf - it is an indexing into the
+                # representation layer's parameter - and torch does not
+                # populate '.grad' for non-leaves, so without this the
+                # per-sample representation gradient would silently
+                # record as zero rather than fail.
+                if diagnostics_train is not None:
+                    z.retain_grad()
+
                 #-----------------------------------------------------#
 
                 # If noise injection is enabled
@@ -5470,7 +5746,52 @@ class BulkDGD(nn.Module):
                 #-----------------------------------------------------#
 
                 # Backpropagate the loss.
+
+                #-----------------------------------------------------#
+
+                # The dispersion regularization the output module asks
+                # for. Zero for every module but the ones that anchor
+                # the per-sample dispersion to a per-gene baseline or a
+                # mean trend - and for those it is what makes them what
+                # they are.
+                #
+                # IT WAS MISSING HERE. The identical call sits in
+                # '_optimize_rep', so the penalty was applied when
+                # representations were FOUND and never while the
+                # decoder was TRAINED - which is the half that decides
+                # what the dispersion learns to be. A model trained
+                # with 'nb_full_dispersion_shrunk' was therefore not a
+                # shrunk model at all: with no penalty the module is
+                # 'nb_full_dispersion' in a different parameterization,
+                # free to represent exactly the same thing.
+                #
+                # It was found by instrumenting a divergence, not by
+                # reading the code: a new module's learned widths never
+                # moved from their initial value through eighty epochs,
+                # its per-gene baseline moved freely, and its
+                # unpenalized deviation grew without bound - three
+                # symptoms of one absent gradient.
+                loss = loss + \
+                    self.decoder.nb.dispersion_regularization(
+                        pred_means = pred_means,
+                        pred_log_r_values = pred_log_r_values,
+                        reduction = loss_reduction_type)
+
                 loss.backward()
+
+                #-----------------------------------------------------#
+
+                # Fold this batch into the per-sample diagnostics.
+                #
+                # It has to happen HERE - after the backward pass, so
+                # the hooks hold this batch's gradients, and before the
+                # clipping, which rescales them and would make one
+                # sample's recorded pull depend on the rest of its
+                # batch.
+                if diagnostics_train is not None:
+
+                    diagnostics_train.set_batch(samples_ixs)
+                    diagnostics_train.record_batch(z = z)
 
                 #-----------------------------------------------------#
 
@@ -5846,6 +6167,25 @@ class BulkDGD(nn.Module):
                 #-----------------------------------------------------#
 
                 # Backpropagate the loss.
+
+                #-----------------------------------------------------#
+
+                # The same penalty, for the test samples' own
+                # representations.
+                #
+                # The decoder is frozen here, so this reaches only the
+                # representations - which is exactly what it does in
+                # '_optimize_rep', where a new dataset's
+                # representations are found. Leaving it out of one of
+                # the two paths that find representations, and in the
+                # other, is the inconsistency that hid the missing
+                # training term for as long as it did.
+                loss = loss + \
+                    self.decoder.nb.dispersion_regularization(
+                        pred_means = pred_means,
+                        pred_log_r_values = pred_log_r_values,
+                        reduction = loss_reduction_type)
+
                 loss.backward()
 
                 #-----------------------------------------------------#
@@ -6002,6 +6342,36 @@ class BulkDGD(nn.Module):
                 f"{losses_list[-1][6]:.3f}, epoch total CPU time " \
                 f"{time_tot_epoch_cpu:.3f} s, epoch " \
                 f"total wall clock time {time_tot_epoch_wall:.3f} s"
+
+            #---------------------------------------------------------#
+
+            # Whatever the output module has to say about its own
+            # internals, on its own line so that the loss line keeps
+            # the shape everything that reads it expects.
+            #
+            # Most modules say nothing. The ones that carry parameters
+            # of their own report them here because a diverging loss
+            # says only THAT something left the rails: when a module
+            # holds a per-gene dispersion, a per-gene prior width and a
+            # free per-sample deviation, the loss alone cannot say
+            # which of the three went first, and guessing costs a
+            # training run per guess.
+            # Write the epoch's per-sample influence record, if the
+            # diagnostics are on.
+            if diagnostics_train is not None:
+
+                diagnostics_train.end_epoch(
+                    epoch = epoch,
+                    sample_names = samples_names_train)
+
+            diagnostics = self.decoder.nb.diagnostics()
+
+            if diagnostics:
+
+                logger.info(
+                    f"Epoch {epoch} [output module]: "
+                    + ", ".join(f"{k}={v:.4g}"
+                                for k, v in diagnostics.items()))
             
             # If the learning rate scheduler for the latent space is
             # enabled and the latent space is the legacy GMM
@@ -6050,7 +6420,50 @@ class BulkDGD(nn.Module):
             info_msg += "."
             logger.info(info_msg)
 
-            #---------------------------------------------------------# 
+            #---------------------------------------------------------#
+
+            # Record the learning rates of this epoch, if a file was
+            # asked for.
+            #
+            # They exist nowhere else. The block above reads them only
+            # when a scheduler is enabled and only to build a log
+            # string, so 'loss.csv' has no learning-rate column and
+            # anything that needs the schedule after the fact - TracIn
+            # weights each checkpoint by the rate in force there - has
+            # to parse them back out of the log text or do without.
+            # Doing without is what happened: an influence analysis
+            # silently fell back to a weight of one for every
+            # checkpoint.
+            #
+            # The rates are read from the optimizers rather than the
+            # schedulers, so they are recorded whether or not a
+            # schedule is in use, and the file is rewritten every epoch
+            # so that it is complete for the epochs that ran even if
+            # the run does not finish.
+            if output_lr_file is not None:
+
+                lrs_list.append(
+                    {"epoch": epoch,
+                     "lr_decoder":
+                         optimizer_decoder.param_groups[0]["lr"],
+                     "lr_rep_train":
+                         optimizer_rep_train.param_groups[0]["lr"],
+                     # 'optimizer_latent' exists ONLY for the legacy
+                     # mixture - with tgmm the name is never bound at
+                     # all, so testing it for None raises rather than
+                     # returning False. The isinstance check is the one
+                     # the rest of the loop uses.
+                     "lr_latent":
+                         optimizer_latent.param_groups[0]["lr"]
+                         if isinstance(
+                             self.latent,
+                             latents.GaussianMixtureModelLegacy)
+                         else float("nan")})
+
+                pd.DataFrame(lrs_list).set_index("epoch").to_csv(
+                    output_lr_file)
+
+            #---------------------------------------------------------#
 
             # If latent metrics are active, compute and log them.
             if latent_metrics_active:
@@ -6700,11 +7113,15 @@ class BulkDGD(nn.Module):
 
         #-------------------------------------------------------------#
 
-        # Create the dataset.
+        # Create the dataset. The mask goes in with it: a sample only
+        # part of which was measured has no scaling factor over all of
+        # its genes, and the unmeasured ones must not enter it as the
+        # zeros they were filled with.
         dataset = \
             dataclasses.GeneExpressionDataset(\
                 df = df_expr_data,
-                scaling_factor = self._scaling_factor)
+                scaling_factor = self._scaling_factor,
+                mask = genes_mask)
 
         #-------------------------------------------------------------#
 
@@ -6923,30 +7340,37 @@ class BulkDGD(nn.Module):
             The representations found from the measured genes.
         """
 
-        # If the model's scaling factor is not the mean.
+        # If the model is median-scaled and was handed a panel.
         #
-        # The scale of a sample only part of which was measured is
-        # solved for, and the equation it is solved from is the one the
-        # MEAN satisfies: the mean over all the genes is the measured
-        # counts plus the model's expectation of the unmeasured ones,
-        # divided by the number of genes, and the scale can be taken
-        # out of that sum because a sum is linear. A median is not a
-        # sum of anything, the scale does not come out of it, and there
-        # is no closed form to solve. Nothing here would fail if it
-        # were used - it would return a scale that is simply wrong, and
-        # every imputed count with it.
-        if self._scaling_factor != "mean":
+        # A mean-scaled model recovers the scale of a partly measured
+        # sample by solving for it, and the equation can be solved
+        # because a mean is a sum, of which the unmeasured part can be
+        # filled in with the model's expectation. A median is not a sum
+        # and gives no such equation.
+        #
+        # What it gives instead is a condition. The measured genes'
+        # median estimates the whole sample's WHEN THE UNMEASURED GENES
+        # ARE MISSING AT RANDOM, and does not when they are a panel
+        # chosen for being worth measuring - such a panel is biased
+        # upward, and so is its median. The mean-scaled path is
+        # indifferent to which of the two it was handed; this one is
+        # not, and 'genes_measured' is exactly how a caller says
+        # 'panel'.
+        if self._scaling_factor == "median" \
+           and genes_measured is not None:
 
             # Raise an error.
             raise NotImplementedError(
-                "Imputation is only implemented for a model whose "
-                f"scaling factor is the mean, and this one's is the "
-                f"'{self._scaling_factor}'. The scale of a partly "
-                "measured sample is recovered by solving for it, and "
-                "that can be done for the mean because it is a sum "
-                "over the genes, of which the unmeasured part can be "
-                "filled in with the model's expectation. The median "
-                "is not a sum and does not give the same equation.")
+                "Imputation from a fixed panel of measured genes is "
+                "only implemented for a model whose scaling factor is "
+                f"the mean, and this one's is the "
+                f"'{self._scaling_factor}'. A median-scaled model takes "
+                "the scale of a partly measured sample to be the median "
+                "over the genes it did measure, which is right when "
+                "those are a random subset of the transcriptome and "
+                "biased when they were chosen, as a panel is. Mask at "
+                "random - pass the unmeasured counts as NaN and leave "
+                "'genes_measured' unset - or use a mean-scaled model.")
 
         #-------------------------------------------------------------#
 
@@ -7011,14 +7435,20 @@ class BulkDGD(nn.Module):
         # 'get_representations' is the decoder's output, before any scale
         # has been put on it. See '_get_masked_scaling_factors' for why
         # it is this and not the mean of what is there.
-        obs_measured = (obs * measured).sum(axis = 1, keepdims = True)
-
-        pred_unmeasured = \
-            (pred * (~measured)).sum(axis = 1, keepdims = True)
-
+        #
+        # It is that method that is called, and not a second copy of its
+        # arithmetic written out here, because the two must agree and
+        # the only way to be sure they agree is for there to be one of
+        # them. A copy was here once, and it computed the mean-scaled
+        # estimate whatever the model's scaling factor was.
         scale = \
-            obs_measured / np.clip(len(genes_model) - pred_unmeasured,
-                                   1e-6, None)
+            self.__class__._get_masked_scaling_factors(
+                obs_counts = torch.from_numpy(obs),
+                pred_means = torch.from_numpy(pred),
+                mask = torch.from_numpy(
+                    measured.astype("float64")),
+                n_genes = len(genes_model),
+                scaling_factor = self._scaling_factor).numpy()
 
         means = pred * scale
 
@@ -7176,6 +7606,141 @@ class BulkDGD(nn.Module):
         return df_prob_rep, df_prob_comp
 
 
+    def _fit_final_gmm(self,
+                       reps_train: torch.Tensor,
+                       config_final: dict[str, object],
+                       gmm_final_pth_file: str) -> None:
+        """Fit the Gaussian mixture model that describes the latent
+        space after training, and save it.
+
+        This is not the prior. The prior is what training used, what
+        `gmm.pth` holds, and what finding a representation for a new
+        sample goes through; it is left exactly as training left it.
+        What is fitted here is the density of the space the training
+        arrived at, for everything that asks a question about that
+        density - the probability density of a sample, which component
+        it belongs to, how atypical it is, and which directions a
+        sampler should draw in.
+        """
+
+        # Get a copy of the options, so that the model's own are not
+        # modified by reading them.
+        options = dict(self._gmm_final_options)
+
+        # Get the type of covariance the final mixture should have.
+        covariance_type = options.get("covariance_type")
+
+        # If no covariance type was given
+        if covariance_type is None:
+
+            # Raise an error. There is no default: a model that asks
+            # for a final mixture is asking for a covariance the prior
+            # did not have, and which one is the whole of the request.
+            errstr = \
+                "The 'gmm_final' section of the model's " \
+                "configuration must specify a 'covariance_type'."
+            raise ValueError(errstr)
+
+        # Get how far each component's covariance is pulled towards
+        # the one shared by all of them.
+        shrinkage = options.get("shrinkage", 0.0)
+
+        # If a per-component full covariance was asked for without any
+        # shrinkage
+        if covariance_type == "full" and not shrinkage:
+
+            # Raise an error. Each component would be fitting a full
+            # covariance matrix from the samples it alone collected,
+            # which is not estimable and comes back with negative
+            # variances - refusing is better than returning a mixture
+            # whose density is undefined.
+            errstr = \
+                "A 'full' covariance for the final Gaussian mixture " \
+                "model needs a non-zero 'shrinkage': each component " \
+                "would otherwise be fitting a full covariance matrix " \
+                "from the samples it alone collected, which is not " \
+                "estimable and returns negative variances."
+            raise ValueError(errstr)
+
+        #-------------------------------------------------------------#
+
+        # Get what the fit is allowed to move.
+        fit = config_final.get("fit", "covariance_only")
+
+        # If only the covariance is refitted
+        if fit == "covariance_only":
+
+            # Refit it, with the means and the weights frozen where
+            # training left them.
+            self._latent_final = \
+                latents.fit_final_gmm(\
+                    gmm = self.latent,
+                    reps = reps_train,
+                    covariance_type = covariance_type,
+                    shrinkage = shrinkage,
+                    reg_covar = options.get("reg_covar"))
+
+        # If the whole mixture is refitted
+        elif fit == "full_em":
+
+            # Warn the user. Everything moves: the means, the weights,
+            # and which sample belongs to which component, so whatever
+            # a component was labelled with before is no longer
+            # necessarily what it holds.
+            warn_msg = \
+                "The final Gaussian mixture model is being fitted " \
+                "with 'fit: full_em', so its means and weights are " \
+                "re-estimated and its components are NOT the " \
+                "components of the prior. Anything that maps a " \
+                "component to a label - a tissue, a cancer type - " \
+                "was established on the prior's components and does " \
+                "not carry over. Use 'fit: covariance_only' to keep " \
+                "the components as they are."
+            logger.warning(warn_msg)
+
+            # Copy the trained mixture, so that the prior is not the
+            # thing being refitted.
+            gmm_final = copy.deepcopy(self.latent)
+
+            # Set the type of covariance asked for, before fitting, so
+            # that the fit estimates that shape.
+            gmm_final.covariance_type = covariance_type
+
+            # Fit the copy to the final representations.
+            gmm_final.fit(\
+                reps_train,
+                max_iter = config_final.get("max_iter", 1000))
+
+            # Save it in the model's attributes.
+            self._latent_final = gmm_final
+
+        # Otherwise
+        else:
+
+            # Raise an error.
+            errstr = \
+                f"Unsupported 'fit' option '{fit}' for the final " \
+                "Gaussian mixture model. The supported options are: " \
+                "covariance_only, full_em."
+            raise ValueError(errstr)
+
+        #-------------------------------------------------------------#
+
+        # Save the final mixture's parameters, to its own file.
+        self._latent_final.save(\
+            _internals.uniquify_file_path(gmm_final_pth_file))
+
+        # Inform the user that the parameters were saved, and that the
+        # prior is still the prior.
+        info_msg = \
+            "The final Gaussian mixture model " \
+            f"(covariance type: '{covariance_type}', shrinkage: " \
+            f"{shrinkage}, fit: '{fit}') was successfully saved in " \
+            f"'{gmm_final_pth_file}'. The prior the model was " \
+            "trained with is unchanged."
+        logger.info(info_msg)
+
+
     def train(self,
               df_samples: pd.DataFrame,
               names_train: list,
@@ -7183,6 +7748,7 @@ class BulkDGD(nn.Module):
               config_train: dict[str, object],
               gmm_pth_file: str = "gmm.pth",
               dec_pth_file: str = "dec.pth",
+              gmm_final_pth_file: str = "gmm_final.pth",
               pathways: Optional[pd.DataFrame] = None,
               labels_train: Optional[object] = None,
               labels_test: Optional[object] = None) -> \
@@ -7224,7 +7790,20 @@ class BulkDGD(nn.Module):
         dec_pth_file : :class:`str`, ``"dec.pth"``
             The .pth file where to save the decoder's trained
             parameters (weights and biases).
-        
+
+        gmm_final_pth_file : :class:`str`, ``"gmm_final.pth"``
+            The .pth file where to save the parameters of the Gaussian
+            mixture model fitted to the representations after
+            training.
+
+            It is only written if the model's configuration has a
+            ``gmm_final`` section. It is a **separate** file from
+            ``gmm_pth_file``, which keeps the prior the model was
+            trained with: finding a representation for a new sample
+            goes through the prior, and swapping the two would put a
+            mixture fitted to the representations in charge of
+            producing them.
+
         pathways : :class:`dict`, optional
             A dictionary where the keys are pathway names and the
             values are lists of genes' Ensembl IDs belonging to
@@ -7460,6 +8039,20 @@ class BulkDGD(nn.Module):
             "The trained Gaussian mixture model's parameters were " \
             f"successfully saved in '{gmm_pth_file}'."
         logger.info(info_msg)
+
+        #-------------------------------------------------------------#
+
+        # Fit the final Gaussian mixture model, if the model asks for
+        # one. This happens after the prior has been saved, and writes
+        # a different file: the prior is what training used and what
+        # finding a representation goes through, and it is not touched.
+        if self._gmm_final_options is not None:
+
+            self._fit_final_gmm(\
+                reps_train = reps[0],
+                config_final = \
+                    config_train.get("gmm_final_training_options", {}),
+                gmm_final_pth_file = gmm_final_pth_file)
 
         #-------------------------------------------------------------#
 

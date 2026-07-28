@@ -227,6 +227,27 @@ def set_parser() -> argparse.ArgumentParser:
     #-----------------------------------------------------------------#
 
     # Set the default value for the argument.
+    ogmmf_default = "gmm_final.pth"
+
+    # Set a help message.
+    ogmmf_help = \
+        f"""The output .pth file where the parameters of the Gaussian
+        mixture model fitted to the representations after training will
+        be saved. It is only written if the model's configuration has a
+        'gmm_final' section. It is a separate file from the one given
+        by '--output-latent', which keeps the prior the model was
+        trained with. By default, the file will be named
+        '{ogmmf_default}'."""
+
+    # Add the argument to the group.
+    output_group.add_argument("-ogmmf", "--output-gmm-final",
+                              type = str,
+                              default = ogmmf_default,
+                              help = ogmmf_help)
+
+    #-----------------------------------------------------------------#
+
+    # Set the default value for the argument.
     ort_default = "representations_train.csv"
 
     # Set a help message.
@@ -475,6 +496,7 @@ def main(args: argparse.Namespace) -> None:
     # Get the arguments corresponding to the output files.
     output_latent = os.path.join(wd, args.output_latent)
     output_decoder = os.path.join(wd, args.output_decoder)
+    output_gmm_final = os.path.join(wd, args.output_gmm_final)
     output_rep_train = os.path.join(wd, args.output_rep_train)
     output_rep_test = os.path.join(wd, args.output_rep_test)
     output_pred_means_train = \
@@ -773,8 +795,9 @@ def main(args: argparse.Namespace) -> None:
                             names_train = names_train,
                             names_test = names_test,
                             config_train = config_train,
-                            latent_pth_file = output_latent,
-                            decoder_pth_file = output_decoder,
+                            gmm_pth_file = output_latent,
+                            dec_pth_file = output_decoder,
+                            gmm_final_pth_file = output_gmm_final,
                             labels_train = labels_train,
                             labels_test = labels_test)
 

@@ -265,6 +265,26 @@ class OutputModuleBase(nn.Module):
         return means * scaling_factors
 
 
+    def diagnostics(self) -> dict:
+        """The module's internal state, for the training loop to log
+        once an epoch.
+
+        Most modules have nothing to say and return an empty
+        dictionary, which the training loop prints as nothing at all.
+
+        It exists because a diverging loss says only THAT something
+        left the rails, and a module that carries several parameters -
+        a per-gene baseline dispersion, a per-gene prior width, a free
+        per-sample deviation - gives no way to tell which of them went
+        first. Three separate hypotheses were tried against one such
+        divergence and each cost a training run to reject; the numbers
+        that would have distinguished them were never written down.
+        """
+
+        # By default, a module reports nothing.
+        return {}
+
+
     def dispersion_regularization(self,
                                   pred_means,
                                   pred_log_r_values,
@@ -1637,101 +1657,6 @@ class OutputModuleNBFullDispersion(OutputModuleNB):
 
 
 #######################################################################
-
-
-class OutputModuleNBFullDispersionShrunk(OutputModuleNBFullDispersion):
-
-    """The full-dispersion module, with the per-sample dispersion
-    shrunk toward a per-gene baseline.
-
-    The plain full-dispersion module predicts the log-r-value of every
-    gene in every sample as a free linear projection of the decoder's
-    features - nothing anchors it, and the likelihood barely constrains
-    it, so it is the noisiest thing the model predicts. This writes the
-    log-r-value as a per-gene baseline plus a per-sample deviation, and
-    penalizes the deviation. It is the same idea DESeq2 and edgeR use:
-    let each gene have its own stable dispersion, and let a sample move
-    it only as far as the data insists.
-
-    The per-gene baseline is a parameter fitted across all samples, so
-    it is stable; the per-sample deviation is what the free projection
-    used to be, but pulled back toward zero. The strength of the pull is
-    ``shrinkage_lambda`` - zero recovers the plain full-dispersion
-    module, and a large value recovers the per-gene 'feature-dispersion'
-    module.
-    """
-
-
-    def __init__(self,
-                 input_dim,
-                 output_dim,
-                 activation = "softplus",
-                 shrinkage_lambda = 0.5,
-                 r_init = 2):
-        """Initialize the module.
-
-        Parameters
-        ----------
-        input_dim : :class:`int`
-            The dimensionality of the input.
-
-        output_dim : :class:`int`
-            The number of genes.
-
-        activation : :class:`str`, {``"sigmoid"``, ``"softplus"``}, \
-            ``"softplus"``
-            The activation for the means.
-
-        shrinkage_lambda : :class:`float`, ``0.5``
-            How hard the per-sample deviation is pulled toward zero.
-
-        r_init : :class:`float`, ``2``
-            The r-value the per-gene baseline starts at.
-        """
-
-        super().__init__(input_dim = input_dim,
-                         output_dim = output_dim,
-                         activation = activation)
-
-        # The per-gene baseline log-r-value, fitted across all samples.
-        self._log_r_gene = \
-            nn.Parameter(torch.full(size = (output_dim,),
-                                    fill_value = math.log(r_init)))
-
-        # Start the per-sample deviation at zero, so the module begins
-        # at the stable per-gene baseline and moves away only as the
-        # training pulls it.
-        nn.init.zeros_(self._layer_r_values.weight)
-        nn.init.zeros_(self._layer_r_values.bias)
-
-        self._shrinkage_lambda = float(shrinkage_lambda)
-
-
-    def forward(self, x):
-
-        # The parent's 'log_r' is the free projection - here it is the
-        # per-sample deviation from the per-gene baseline.
-        m, deviation = super().forward(x)
-
-        return m, self._log_r_gene + deviation
-
-
-    def dispersion_regularization(self,
-                                  pred_means,
-                                  pred_log_r_values,
-                                  reduction = "sum"):
-
-        # The deviation is what the log-r-value has moved from the
-        # per-gene baseline.
-        deviation = pred_log_r_values - self._log_r_gene
-
-        penalty = deviation.pow(2)
-
-        penalty = penalty.sum() if reduction == "sum" else penalty.mean()
-
-        return self._shrinkage_lambda * penalty
-
-
 class OutputModuleNBFullDispersionTied(OutputModuleNBFullDispersion):
 
     """The full-dispersion module, with the per-sample dispersion tied
@@ -1795,19 +1720,53 @@ class OutputModuleNBFullDispersionTied(OutputModuleNBFullDispersion):
             + self._log_r_slope * torch.log(m + 1e-8)
 
         return m, log_r
-
-
-class OutputModuleNBFullDispersionShrunkTied(
+class OutputModuleNBFullDispersionHierarchical(
         OutputModuleNBFullDispersion):
 
-    """The full-dispersion module, tied to the mean AND with a shrunk
-    per-sample deviation.
+    """The full-dispersion module, with the per-sample dispersion given
+    a proper hierarchical prior whose width is LEARNED.
 
-    The dispersion-mean trend of the 'tied' module, plus a per-sample
-    deviation from that trend that is penalized as in the 'shrunk'
-    module. The trend carries the stable part of the dispersion, and the
-    penalized deviation carries what a sample genuinely needs beyond the
-    trend - the two ideas together.
+    'nb_full_dispersion_shrunk' writes the log-r-value as a per-gene
+    baseline plus a per-sample deviation and penalizes the deviation
+    with a fixed ``shrinkage_lambda``. That fixed strength is the whole
+    of its trouble: it was measured fixing the tail of the null - a
+    fourteen-fold inflation down to under two - and wrecking the bulk
+    at the same time, five times too conservative where the test was
+    already right, because ONE number decided how hard every gene in
+    every sample was pulled back.
+
+    A penalty of ``lambda * deviation^2`` is the negative log of a
+    Gaussian prior on the deviation whose width is fixed at
+    ``1/sqrt(2*lambda)``. Written that way what is missing is obvious,
+    and so is the reason the strength could not simply be made a
+    parameter: the prior's normalizing constant. With no ``log sigma``
+    term, widening the prior only ever lowers the loss, so a free
+    strength runs straight to no shrinkage at all.
+
+    So this writes the prior properly:
+
+        log r[gene, sample] = log r[gene] + deviation[gene, sample]
+        deviation[gene, sample] ~ Normal(0, sigma[gene]^2)
+
+    and adds its whole negative log-density, the ``log sigma``
+    included. That makes ``sigma`` estimable, and it is estimated PER
+    GENE: each gene learns how far its own dispersion may move from
+    sample to sample, rather than inheriting one number chosen for all
+    of them.
+
+    The two modules it sits between are its own limiting cases. As
+    ``sigma`` goes to zero the deviation is pinned and this becomes
+    'nb_feature_dispersion', one dispersion per gene; as ``sigma``
+    grows the prior stops constraining anything and this becomes
+    'nb_full_dispersion'. Neither is imposed - a gene whose dispersion
+    genuinely moves between samples keeps a wide ``sigma``, one whose
+    does not gets a narrow one, and the likelihood decides which is
+    which.
+
+    Every term here belongs to the joint log-likelihood the model
+    already maximizes, so nothing about the inference changes in kind:
+    the representations are still found by the same MAP, with one more
+    properly normalized prior in the objective.
     """
 
 
@@ -1815,38 +1774,171 @@ class OutputModuleNBFullDispersionShrunkTied(
                  input_dim,
                  output_dim,
                  activation = "softplus",
-                 shrinkage_lambda = 0.5,
+                 sigma_init = 0.1,
+                 sigma_min = 0.01,
+                 sigma_prior = 0.1,
+                 sigma_prior_tau = 1.0,
                  r_init = 2):
+        """Initialize the module.
+
+        Parameters
+        ----------
+        input_dim : :class:`int`
+            The dimensionality of the input.
+
+        output_dim : :class:`int`
+            The number of genes.
+
+        activation : :class:`str`, {``"sigmoid"``, ``"softplus"``}, \
+            ``"softplus"``
+            The activation for the means.
+
+        sigma_init : :class:`float`, ``0.1``
+            The width each gene's prior starts at, in log-r units.
+
+            It starts narrow, so that training begins near the stable
+            per-gene dispersion and widens only for the genes whose
+            data ask for it. Starting wide would begin at the free
+            per-sample dispersion, which is the thing being moved away
+            from.
+
+        sigma_min : :class:`float`, ``0.01``
+            The smallest width the prior may take.
+
+            A gene whose deviations all went to zero would send its own
+            ``sigma`` there too, and the ``log sigma`` term diverges
+            when it arrives.
+
+            It is 0.01 and not something smaller because the floor is
+            not only a numerical guard, it is a statement about how
+            tight a prior is meant to be believed. The per-sample
+            log-r-values move by about 0.2 in natural-log units between
+            two runs that differ only in a seed, so a width of 1e-3
+            calls a perfectly ordinary deviation a two-hundred-sigma
+            event and returns a penalty near 1e8. Training survived to
+            epoch 151 at that floor and then went to NaN in a single
+            step.
+
+        sigma_prior : :class:`float`, ``0.1``
+            The width the per-gene widths are themselves pulled
+            towards.
+
+            Without a prior on the widths the objective is unbounded -
+            a gene whose deviations reach zero sends its own width down
+            after them, and ``log sigma`` with it. This is what makes
+            the optimum exist.
+
+        sigma_prior_tau : :class:`float`, ``1.0``
+            How far a gene's width may wander from ``sigma_prior``, in
+            natural-log units, before the prior objects.
+
+            One is deliberately weak: it leaves a gene free to sit
+            anywhere between roughly a third and three times
+            ``sigma_prior`` without penalty worth the name, and only
+            bites at the collapse the funnel drives towards.
+
+        r_init : :class:`float`, ``2``
+            The r-value the per-gene baseline starts at.
+        """
 
         super().__init__(input_dim = input_dim,
                          output_dim = output_dim,
                          activation = activation)
 
-        self._log_r_intercept = \
+        # The per-gene baseline log-r-value, fitted across all samples.
+        self._log_r_gene = \
             nn.Parameter(torch.full(size = (output_dim,),
                                     fill_value = math.log(r_init)))
 
-        self._log_r_slope = nn.Parameter(torch.zeros(1))
+        # The width of each gene's prior, carried as the logarithm of
+        # the amount ABOVE the floor, so that it cannot go negative
+        # however the optimizer moves it and never reaches the floor
+        # where the penalty's gradient would blow up.
+        self._log_sigma = \
+            nn.Parameter(
+                torch.full(size = (output_dim,),
+                           fill_value = \
+                               math.log(max(sigma_init - sigma_min,
+                                            1.0e-12))))
 
-        # The per-sample deviation from the trend starts at zero.
+        # Start the per-sample deviation at zero, so the module begins
+        # at the stable per-gene baseline and moves away only as the
+        # training pulls it.
         nn.init.zeros_(self._layer_r_values.weight)
         nn.init.zeros_(self._layer_r_values.bias)
 
-        self._shrinkage_lambda = float(shrinkage_lambda)
+        self._sigma_min = float(sigma_min)
+        self._sigma_prior = float(sigma_prior)
+        self._sigma_prior_tau = float(sigma_prior_tau)
+        # Filled in by 'dispersion_regularization' and read once an
+        # epoch by 'diagnostics'.
+        self._last_deviation_absmax = None
+        self._last_deviation_absmed = None
 
 
-    def _trend(self, m):
+    @property
+    def sigma(self):
+        """The learned width of each gene's dispersion prior.
 
-        # The dispersion the mean-trend predicts, in log space.
-        return self._log_r_intercept \
-            + self._log_r_slope * torch.log(m + 1e-8)
+        The floor is ADDED rather than clamped, which matters and was
+        found the hard way. A ``clamp`` has zero gradient below its
+        threshold, so a gene whose width reached the floor stopped
+        being able to move - while the penalty went on being evaluated
+        at the floor, where ``0.5 * (deviation / 1e-3)^2`` multiplies
+        the deviation's gradient by a million. Training ran cleanly to
+        epoch 151 and then went to NaN in one step.
+
+        Adding the floor keeps ``sigma`` above it by construction, and
+        leaves the gradient finite everywhere, so a width that wants to
+        be small approaches the floor smoothly instead of hitting a
+        wall and taking the decoder with it.
+        """
+
+        return self._sigma_min + self._log_sigma.exp()
 
 
-    def forward(self, x):
+    def forward(self,
+                x):
 
+        # The parent's 'log_r' is the free projection - here it is the
+        # per-sample deviation from the per-gene baseline.
         m, deviation = super().forward(x)
 
-        return m, self._trend(m) + deviation
+        return m, self._log_r_gene + deviation
+
+
+    def diagnostics(self) -> dict:
+        """Every quantity this module carries that could be the one
+        that diverges, so that a divergence names itself.
+
+        The last per-batch deviation is kept because it is the only one
+        of the four that is not a parameter - it is the free
+        projection's output, and it is the most likely of them to run.
+        """
+
+        with torch.no_grad():
+
+            sigma = self.sigma
+
+            out = {"sigma_min" : sigma.min().item(),
+                   "sigma_med" : sigma.median().item(),
+                   "sigma_max" : sigma.max().item(),
+                   "log_r_gene_min" : self._log_r_gene.min().item(),
+                   "log_r_gene_med" : self._log_r_gene.median().item(),
+                   "log_r_gene_max" : self._log_r_gene.max().item()}
+
+            # The free projection's weights, which is what turns a
+            # representation into a per-sample deviation. If the
+            # deviation runs, this is where it comes from.
+            out["dev_w_absmax"] = \
+                self._layer_r_values.weight.abs().max().item()
+
+            # The deviations themselves, as last seen.
+            if self._last_deviation_absmax is not None:
+                out["dev_absmax"] = self._last_deviation_absmax
+                out["dev_absmed"] = self._last_deviation_absmed
+
+        return out
 
 
     def dispersion_regularization(self,
@@ -1854,14 +1946,86 @@ class OutputModuleNBFullDispersionShrunkTied(
                                   pred_log_r_values,
                                   reduction = "sum"):
 
-        # The deviation is what the log-r-value has moved from the trend.
-        deviation = pred_log_r_values - self._trend(pred_means)
+        # The deviation is what the log-r-value has moved from the
+        # per-gene baseline.
+        deviation = pred_log_r_values - self._log_r_gene
 
-        penalty = deviation.pow(2)
+        # The width of each gene's prior, broadcast over the samples.
+        sigma = self.sigma
 
+        # Kept for 'diagnostics', which runs once an epoch and outside
+        # the graph - detached so that holding on to it cannot keep a
+        # batch's graph alive.
+        with torch.no_grad():
+            self._last_deviation_absmax = deviation.abs().max().item()
+            self._last_deviation_absmed = deviation.abs().median().item()
+
+        # The negative log-density of the deviation under its own
+        # gene's prior. The second term is the normalizing constant,
+        # and it is the whole reason 'sigma' can be learned at all:
+        # without it, widening the prior would always pay.
+        penalty = 0.5 * (deviation / sigma).pow(2) + torch.log(sigma)
+
+        # The constant half-log-two-pi is left out. It depends on no
+        # parameter, so it moves no gradient - but it does move the
+        # printed loss, so a number from this module is not comparable
+        # to one from a module that keeps it.
         penalty = penalty.sum() if reduction == "sum" else penalty.mean()
 
-        return self._shrinkage_lambda * penalty
+        #-------------------------------------------------------------#
+
+        # The prior on the widths themselves, WITHOUT WHICH THERE IS NO
+        # OPTIMUM TO FIND.
+        #
+        # The two terms above are a hierarchical model estimated by
+        # MAP, and the joint MAP of a hierarchical model over both the
+        # deviations and their width is unbounded - it is Neal's
+        # funnel. Drive a gene's deviations to zero and its own 'sigma'
+        # then wants to follow them down, where 'log sigma' goes to
+        # minus infinity and the objective with it. Nothing in the
+        # likelihood stops it, because the reward for a narrow prior
+        # grows without limit while the cost stays at zero.
+        #
+        # That is not a hypothesis about what went wrong. Training ran
+        # to epoch 160 at a loss better than the plain module's and
+        # then went to 5e56 in five epochs; clamping the width had
+        # already produced a NaN at epoch 151, and a floor only moves
+        # the funnel's mouth rather than closing it.
+        #
+        # So the widths get a prior of their own, log-normal about
+        # 'sigma_prior': narrow widths are now paid for, the objective
+        # is bounded below, and the optimum exists. 'sigma_prior_tau'
+        # is how far a gene may wander from it, in natural-log units,
+        # before the prior starts to object.
+        log_sigma_prior = math.log(self._sigma_prior)
+
+        prior = \
+            0.5 * ((torch.log(sigma) - log_sigma_prior)
+                   / self._sigma_prior_tau).pow(2)
+
+        # Scaled by the number of samples in the batch, which is not a
+        # fudge - it is what makes the width's optimum independent of
+        # how the data happen to be batched.
+        #
+        # 'log sigma' above is counted once per SAMPLE, since it
+        # normalizes one deviation each; the prior is a statement about
+        # one width per GENE. Counted once against a batch of 64 the
+        # prior is outvoted 64 to 1, and the width collapses anyway -
+        # measured, with the deviations pinned at zero it went straight
+        # to the floor with the prior in place. Solving the stationary
+        # point shows the size of it: with a batch of B the width
+        # settles at 'log sigma_prior - B * tau^2', so at B = 64 and
+        # tau = 1 that is e^-66.
+        #
+        # Scaling by B puts the two on the same footing - one width
+        # against one observation's worth of prior - and the stationary
+        # point becomes 'log sigma_prior - tau^2', which does not move
+        # when the batch size does.
+        n_samples = deviation.shape[0] if deviation.dim() > 1 else 1
+
+        penalty = penalty + n_samples * prior.sum()
+
+        return penalty
 
 
 #######################################################################
@@ -1869,7 +2033,7 @@ class OutputModuleNBFullDispersionShrunkTied(
 
 # Set the available output modules.
 OUTPUT_MODULES = {
-    
+
     # Output module for Poisson distributions.
     "poisson" : OutputModulePoisson,
 
@@ -1881,15 +2045,12 @@ OUTPUT_MODULES = {
     # dispersion.
     "nb_full_dispersion" : OutputModuleNBFullDispersion,
 
-    # Full dispersion, with the per-sample dispersion shrunk toward a
-    # per-gene baseline.
-    "nb_full_dispersion_shrunk" : OutputModuleNBFullDispersionShrunk,
-
     # Full dispersion, tied to the mean.
     "nb_full_dispersion_tied" : OutputModuleNBFullDispersionTied,
 
-    # Full dispersion, tied to the mean and shrunk.
-    "nb_full_dispersion_shrunk_tied" : \
-        OutputModuleNBFullDispersionShrunkTied,
+    # Full dispersion, with a per-gene hierarchical prior whose width
+    # is learned rather than fixed.
+    "nb_full_dispersion_hierarchical" : \
+        OutputModuleNBFullDispersionHierarchical,
 
     }
