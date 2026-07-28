@@ -292,9 +292,13 @@ _MODEL_GMM_FINAL_OPTIONS = {
         },
 
     # The value added to the diagonal of the covariance. If not given,
-    # the trained mixture's own value is used.
+    # the trained mixture's own value is used. It is nullable, and has
+    # to be declared as such: the option defaults to None, so a
+    # configuration that was loaded (and therefore had the default
+    # filled in) could not be loaded again - the check for the
+    # condition was handed a None and raised.
     "reg_covar" : {
-        "type" : (float, int),
+        "type" : (float, int, type(None)),
         "condition" : lambda v: v >= 0,
         "message" : "must be a non-negative number",
         "default" : None,

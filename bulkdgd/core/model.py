@@ -41,6 +41,7 @@ import contextlib
 import copy
 import logging as log
 import math
+import os
 import re
 import time
 from typing import Optional, Union
@@ -51,6 +52,7 @@ import pandas as pd
 from scipy.stats import chi2, nbinom
 import torch
 from torch import nn
+import yaml
 
 # Import from 'bulkdgd'.
 from bulkdgd import _internals
@@ -376,6 +378,11 @@ class BulkDGD(nn.Module):
             # model's attributes.
             self._latent_initial_options = latent_options
 
+            # Keep the type of latent space the model was built with, so
+            # that the model can write out a configuration that rebuilds
+            # itself (for instance when 'prune' emits a pruned model).
+            self._latent_type = latent_type
+
             # The options for the final Gaussian mixture model - the
             # one fitted to the representations after training, which
             # is the density of the latent space rather than the prior
@@ -420,6 +427,12 @@ class BulkDGD(nn.Module):
         # sample is missing - and asking a model what it is a model OF
         # should not require reading the file it was built from.
         self._genes = genes
+
+        # Keep the file the genes were read from, if any. Pruning does
+        # not change which genes the model is OF, so a pruned model
+        # written by 'prune' points at the same gene list its parent
+        # did, rather than duplicating it.
+        self._genes_txt_file = genes_txt_file
 
         #-------------------------------------------------------------#
 
@@ -7739,6 +7752,491 @@ class BulkDGD(nn.Module):
             f"'{gmm_final_pth_file}'. The prior the model was " \
             "trained with is unchanged."
         logger.info(info_msg)
+
+
+    def prune(self,
+              input_reps: Union[str, pd.DataFrame,
+                                list[Union[str, pd.DataFrame]]],
+              config_prune: dict[str, object]) -> "BulkDGD":
+        """Prune a trained decoder to the hidden units it actually uses,
+        without retraining, and return a new, smaller model that
+        computes the same function.
+
+        A hidden unit contributes to the next layer as its activation
+        times its outgoing weights. Two kinds of unit can be removed
+        without changing the decoder's output: a *dead* one (its ReLU
+        output is zero for every input, so its outgoing weights multiply
+        zero) and a *constant* one (its output has no variance across
+        the inputs, so it can be folded into the next layer's bias). A
+        unit that encodes tissue identity has real variance - high on
+        its tissue, low elsewhere - and is therefore never a candidate:
+        the rare-tissue units are kept by construction. This is why the
+        decoder is *not* retrained narrow (a narrow retrain loses those
+        rare-tissue directions under weight decay); the units the wide
+        decoder already learned are kept, and only what it does not use
+        is discarded.
+
+        **The probe set matters.** A unit that is dead on healthy tissue
+        but alive on a tumour must be *seen* alive or it is cut. Pass in
+        ``input_reps`` every representation the model has produced - its
+        own train and test representations *and* whatever out-of-
+        distribution representations exist (tumour, metastatic, ...) -
+        not just the healthy ones.
+
+        The only approximation is the "no variance" threshold, and it is
+        verified: the pruned decoder is run against the full one on the
+        real representations, and the run raises if the maximum relative
+        error on the outputs (the means and the log-r-values) exceeds
+        ``verification_tol``.
+
+        The latent space (the Gaussian mixture model) is *not* touched -
+        pruning is a property of the decoder alone. The pruned model
+        returned by this method points at the same ``gmm_pth_file`` its
+        parent used.
+
+        Parameters
+        ----------
+        input_reps : :class:`str`, :class:`pandas.DataFrame`, or a \
+            :class:`list` of either
+            The representations that make up the probe set. Each may be
+            a path to a CSV file (samples on the rows, the latent
+            dimensions in columns named ``latent_dim_*``, as written by
+            :meth:`get_representations`) or an in-memory
+            :class:`pandas.DataFrame` in the same format. Pass all the
+            representations the model has produced, in and out of
+            distribution - see the note above.
+
+        config_prune : :class:`dict`
+            The configuration for the pruning. The keys are:
+
+            * ``"gmm_pth_file"`` (:class:`str`) - the file with the
+              trained latent space's parameters. It is referenced by the
+              pruned model unchanged; the latent space is not pruned.
+
+            * ``"dec_pth_file"`` (:class:`str`) - the file with the
+              trained decoder's parameters. These are the parameters
+              that get pruned.
+
+            * ``"dec_pruned_pth_file"`` (:class:`str`) - the file where
+              the pruned decoder's parameters will be written.
+
+            * ``"config_model_pruned"`` (:class:`str`) - the YAML file
+              where the pruned model's configuration will be written. It
+              can be loaded later to rebuild the pruned model.
+
+            * ``"pruning_options"`` (:class:`dict`, optional) - the
+              options controlling the pruning:
+
+              - ``"rel_tol"`` (:class:`float`, default ``1e-7``): a unit
+                is kept when its footprint (its activation's standard
+                deviation across the probes, times the norm of its
+                outgoing weights) is at least this fraction of the
+                largest footprint in its layer.
+              - ``"verification_tol"`` (:class:`float`, default
+                ``1e-4``): the maximum relative error, on the real
+                representations, that the pruned decoder is allowed
+                before the method raises.
+              - ``"n_jitter_copies"`` (:class:`int`, default ``2``): how
+                many Gaussian-jittered copies of the probes to add, so a
+                unit that is only ever *nearly* constant on the observed
+                representations is still exercised.
+              - ``"jitter_sd"`` (:class:`float`, default ``0.25``): the
+                scale of the jitter, as a fraction of each latent
+                dimension's standard deviation.
+              - ``"seed"`` (:class:`int`, default ``0``): the seed for
+                the jitter, so the pruning is reproducible.
+
+        Returns
+        -------
+        pruned_model : :class:`BulkDGD`
+            A new model whose decoder has been pruned to its live units.
+            Its parameters have already been written to
+            ``dec_pruned_pth_file`` and ``config_model_pruned``, so it
+            can also be rebuilt from those files later.
+        """
+
+        # Get the required paths from the configuration.
+        gmm_pth_file = config_prune["gmm_pth_file"]
+        dec_pth_file = config_prune["dec_pth_file"]
+        dec_pruned_pth_file = config_prune["dec_pruned_pth_file"]
+        config_model_pruned = config_prune["config_model_pruned"]
+
+        # Get the pruning options, falling back on the defaults. The
+        # defaults are the conservative, vetted values: a unit is kept
+        # unless its footprint is below a ten-millionth of the largest,
+        # which drops only what carries essentially nothing while still
+        # verifying to 1e-4.
+        p_opts = config_prune.get("pruning_options") or {}
+        rel_tol = float(p_opts.get("rel_tol", 1e-7))
+        verification_tol = float(p_opts.get("verification_tol", 1e-4))
+        n_jitter_copies = int(p_opts.get("n_jitter_copies", 2))
+        jitter_sd = float(p_opts.get("jitter_sd", 0.25))
+        seed = int(p_opts.get("seed", 0))
+
+        #-------------------------------------------------------------#
+
+        # The latent dimensionality and the genes are unchanged by
+        # pruning - they are properties of the model, not the decoder's
+        # width.
+        latent_dim = self.latent.dim
+        genes = list(self._genes)
+        device = str(self.device)
+
+        # Build the trained ("full") decoder from the model's own
+        # architecture and load the trained parameters into it. It is
+        # built in the model's precision: a float64 checkpoint read into
+        # a decoder built in float32 would silently lose precision, and
+        # the verification below runs at 1e-4.
+        full_options = \
+            {k: v for k, v in self._decoder_initial_options.items()
+             if k != "decoder_pth_file"}
+
+        with self._default_dtype(self._dtype):
+
+            dec_full, _ = \
+                self._get_decoder(latent_dim = latent_dim,
+                                  genes = genes,
+                                  decoder_options = full_options,
+                                  device = device)
+
+        dec_full = dec_full.eval()
+        dec_full.load_state_dict(
+            torch.load(dec_pth_file, map_location = self.device))
+
+        # Get the device and precision the decoder actually lives in;
+        # every tensor built below matches them.
+        dev = next(dec_full.parameters()).device
+        pdtype = next(dec_full.parameters()).dtype
+
+        #-------------------------------------------------------------#
+
+        # Assemble the probe set: every representation passed in, plus a
+        # handful of jittered copies.
+        z_real = self._load_reps_for_pruning(input_reps = input_reps,
+                                             latent_dim = latent_dim)
+
+        rng = np.random.default_rng(seed)
+        sd_per_dim = z_real.std(axis = 0, keepdims = True)
+
+        probes = [z_real]
+        for _ in range(n_jitter_copies):
+            probes.append(
+                z_real + rng.normal(size = z_real.shape) \
+                    * sd_per_dim * jitter_sd)
+
+        z_probe = np.concatenate(probes, axis = 0)
+
+        z_probe = torch.tensor(z_probe, device = dev, dtype = pdtype)
+        z_real = torch.tensor(z_real, device = dev, dtype = pdtype)
+
+        logger.info(
+            f"Pruning against {len(z_probe):,} probes "
+            f"({len(z_real):,} real representations plus "
+            f"{n_jitter_copies} jittered copies at {jitter_sd} sd).")
+
+        #-------------------------------------------------------------#
+
+        # The two hidden layers and the two output heads of the decoder.
+        sd = {k: v.detach() for k, v in dec_full.state_dict().items()}
+        w0, b0 = sd["main.0.weight"], sd["main.0.bias"]
+        w2, b2 = sd["main.2.weight"], sd["main.2.bias"]
+        w_means = sd["nb._layer_means.weight"]
+        w_r_values = sd["nb._layer_r_values.weight"]
+
+        # Accumulate, in one streamed pass over the probes, each hidden
+        # unit's mean and standard deviation after the ReLU.
+        batch_size = 4096
+        n_probes = len(z_probe)
+        s1 = torch.zeros(w0.shape[0], device = dev, dtype = pdtype)
+        ss1 = torch.zeros_like(s1)
+        s2 = torch.zeros(w2.shape[0], device = dev, dtype = pdtype)
+        ss2 = torch.zeros_like(s2)
+
+        with torch.no_grad():
+            for i in range(0, n_probes, batch_size):
+                z = z_probe[i:i + batch_size]
+                h1 = torch.clamp(z @ w0.T + b0, min = 0.0)
+                h2 = torch.clamp(h1 @ w2.T + b2, min = 0.0)
+                s1 += h1.sum(0)
+                ss1 += (h1 * h1).sum(0)
+                s2 += h2.sum(0)
+                ss2 += (h2 * h2).sum(0)
+
+        mean1 = s1 / n_probes
+        std1 = torch.sqrt(torch.clamp(ss1 / n_probes - mean1 ** 2,
+                                      min = 0.0))
+        mean2 = s2 / n_probes
+        std2 = torch.sqrt(torch.clamp(ss2 / n_probes - mean2 ** 2,
+                                      min = 0.0))
+
+        # A unit's footprint on the next layer is how much its output
+        # varies times how strongly it is read out. Keep the units whose
+        # footprint is a real fraction of the largest in the layer.
+        foot1 = std1 * torch.linalg.norm(w2, dim = 0)
+        foot2 = torch.maximum(
+            std2 * torch.linalg.norm(w_means, dim = 0),
+            std2 * torch.linalg.norm(w_r_values, dim = 0))
+
+        keep1 = foot1 >= rel_tol * foot1.max()
+        keep2 = foot2 >= rel_tol * foot2.max()
+        k1 = torch.where(keep1)[0]
+        d1 = torch.where(~keep1)[0]
+        k2 = torch.where(keep2)[0]
+        d2 = torch.where(~keep2)[0]
+
+        logger.info(
+            f"Layer 1: keeping {len(k1)}/{w0.shape[0]} units "
+            f"(dropping {len(d1)}). "
+            f"Layer 2: keeping {len(k2)}/{w2.shape[0]} units "
+            f"(dropping {len(d2)}).")
+
+        #-------------------------------------------------------------#
+
+        # Fold each dropped unit's constant contribution (its mean
+        # activation times its outgoing weights) into the next layer's
+        # bias, then keep only the surviving rows and columns.
+        b2_folded = b2 + w2[:, d1] @ mean1[d1]
+        w0_pruned = w0[k1, :].contiguous()
+        b0_pruned = b0[k1].contiguous()
+        w2_pruned = w2[:, k1][k2, :].contiguous()
+        b2_pruned = b2_folded[k2].contiguous()
+
+        bm_folded = sd["nb._layer_means.bias"] \
+            + w_means[:, d2] @ mean2[d2]
+        br_folded = sd["nb._layer_r_values.bias"] \
+            + w_r_values[:, d2] @ mean2[d2]
+        wm_pruned = w_means[:, k2].contiguous()
+        wr_pruned = w_r_values[:, k2].contiguous()
+
+        pruned_sd = {
+            "main.0.weight": w0_pruned,
+            "main.0.bias": b0_pruned,
+            "main.2.weight": w2_pruned,
+            "main.2.bias": b2_pruned,
+            "nb._layer_means.weight": wm_pruned,
+            "nb._layer_means.bias": bm_folded,
+            "nb._layer_r_values.weight": wr_pruned,
+            "nb._layer_r_values.bias": br_folded}
+
+        #-------------------------------------------------------------#
+
+        # Build the pruned decoder - same architecture, narrower hidden
+        # layers - and load the folded parameters into it.
+        pruned_options = copy.deepcopy(self._decoder_initial_options)
+        pruned_options["n_units_hidden_layers"] = \
+            [int(len(k1)), int(len(k2))]
+        pruned_options.pop("decoder_pth_file", None)
+
+        with self._default_dtype(self._dtype):
+
+            dec_pruned, _ = \
+                self._get_decoder(latent_dim = latent_dim,
+                                  genes = genes,
+                                  decoder_options = pruned_options,
+                                  device = device)
+
+        dec_pruned = dec_pruned.eval()
+        dec_pruned.load_state_dict(
+            {k: v.clone() for k, v in pruned_sd.items()})
+
+        #-------------------------------------------------------------#
+
+        # Verify the pruned decoder against the full one on the real
+        # representations. If the relative error is too large, the "no
+        # variance" threshold cut a unit that carried something - do not
+        # write a model that is quietly wrong.
+        with torch.no_grad():
+            means_full, log_r_full = dec_full(z_real)
+            means_pruned, log_r_pruned = dec_pruned(z_real)
+
+        def _rel_error(a, b):
+            return (a - b).abs().max().item() \
+                / (a.abs().max().item() + 1e-30)
+
+        rel_means = _rel_error(means_full, means_pruned)
+        rel_log_r = _rel_error(log_r_full, log_r_pruned)
+
+        if max(rel_means, rel_log_r) > verification_tol:
+
+            raise RuntimeError(
+                "The pruned decoder does not reproduce the full one "
+                f"(maximum relative error: means {rel_means:.3e}, "
+                f"log-r-values {rel_log_r:.3e}; tolerance "
+                f"{verification_tol:.1e}). Lower 'rel_tol' or widen the "
+                "probe set.")
+
+        logger.info(
+            "The pruned decoder reproduces the full one "
+            f"(maximum relative error: means {rel_means:.3e}, "
+            f"log-r-values {rel_log_r:.3e}).")
+
+        #-------------------------------------------------------------#
+
+        # Write the pruned decoder's parameters.
+        dec_pruned_dir = \
+            os.path.dirname(os.path.abspath(dec_pruned_pth_file))
+        os.makedirs(dec_pruned_dir, exist_ok = True)
+        torch.save(dec_pruned.state_dict(), dec_pruned_pth_file)
+
+        # Assemble the pruned model's configuration and write it. The
+        # latent space is reused unchanged; only the decoder is narrower
+        # and points at the file just written.
+        pruned_config = \
+            self._build_pruned_config(
+                gmm_pth_file = gmm_pth_file,
+                dec_pruned_pth_file = dec_pruned_pth_file,
+                n_units_hidden_layers = [int(len(k1)), int(len(k2))],
+                config_model_pruned = config_model_pruned)
+
+        config_dir = \
+            os.path.dirname(os.path.abspath(config_model_pruned))
+        os.makedirs(config_dir, exist_ok = True)
+        with open(config_model_pruned, "w") as fh:
+            yaml.safe_dump(pruned_config, fh, sort_keys = False)
+
+        logger.info(
+            f"The pruned model was written to '{dec_pruned_pth_file}' "
+            f"and '{config_model_pruned}'.")
+
+        #-------------------------------------------------------------#
+
+        # Return a fresh instance of the pruned model, on the same
+        # device as this one, with the trained latent space and the
+        # pruned decoder loaded.
+        return self.__class__(**pruned_config, device = device)
+
+
+    def _load_reps_for_pruning(
+            self,
+            input_reps: Union[str, pd.DataFrame,
+                              list[Union[str, pd.DataFrame]]],
+            latent_dim: int) -> np.ndarray:
+        """Load the probe representations for :meth:`prune` into one
+        array of latent points, from CSV file(s) and/or
+        :class:`pandas.DataFrame`(s).
+
+        Parameters
+        ----------
+        input_reps : :class:`str`, :class:`pandas.DataFrame`, or a \
+            :class:`list` of either
+            The representations, as passed to :meth:`prune`.
+
+        latent_dim : :class:`int`
+            The expected number of latent dimensions.
+
+        Returns
+        -------
+        z : :class:`numpy.ndarray`
+            The representations, of shape ``(n_points, latent_dim)``,
+            in double precision.
+        """
+
+        # Normalize the input to a list of items.
+        if isinstance(input_reps, (str, pd.DataFrame)):
+            input_reps = [input_reps]
+
+        frames = []
+
+        for item in input_reps:
+
+            # Read the item if it is a path, otherwise use it directly.
+            df = item if isinstance(item, pd.DataFrame) \
+                else pd.read_csv(item, index_col = 0)
+
+            # Keep only the latent-dimension columns.
+            cols = [c for c in df.columns
+                    if str(c).startswith("latent_dim_")]
+
+            if not cols:
+                raise ValueError(
+                    "No 'latent_dim_*' columns were found in one of the "
+                    "representations passed to 'prune'. Pass the "
+                    "representations as written by 'get_representations'.")
+
+            frames.append(df[cols].to_numpy(dtype = "float64"))
+
+        z = np.concatenate(frames, axis = 0)
+
+        # Make sure the representations match the model's latent space.
+        if z.shape[1] != latent_dim:
+            raise ValueError(
+                f"The representations have {z.shape[1]} latent "
+                f"dimensions, but the model's latent space has "
+                f"{latent_dim}.")
+
+        return z
+
+
+    def _build_pruned_config(
+            self,
+            gmm_pth_file: str,
+            dec_pruned_pth_file: str,
+            n_units_hidden_layers: list[int],
+            config_model_pruned: str) -> dict[str, object]:
+        """Build the configuration of a pruned model from this model's
+        own configuration, for :meth:`prune`.
+
+        Parameters
+        ----------
+        gmm_pth_file : :class:`str`
+            The trained latent space's parameters, reused unchanged.
+
+        dec_pruned_pth_file : :class:`str`
+            The pruned decoder's parameters.
+
+        n_units_hidden_layers : :class:`list`
+            The number of units in the pruned decoder's hidden layers.
+
+        config_model_pruned : :class:`str`
+            Where the configuration will be written - used only to place
+            a sidecar gene list next to it, should the model have no
+            gene file of its own.
+
+        Returns
+        -------
+        config : :class:`dict`
+            The pruned model's configuration, ready to be dumped to YAML
+            and to be passed to the constructor.
+        """
+
+        # Reuse the latent space unchanged, only pointing it at the
+        # trained parameters.
+        latent_options = copy.deepcopy(self._latent_initial_options)
+        latent_options["latent_pth_file"] = gmm_pth_file
+
+        # The decoder is narrower and points at the pruned parameters.
+        decoder_options = copy.deepcopy(self._decoder_initial_options)
+        decoder_options["n_units_hidden_layers"] = n_units_hidden_layers
+        decoder_options["decoder_pth_file"] = dec_pruned_pth_file
+
+        config = {
+            "latent_dim": int(self.latent.dim),
+            "latent_type": self._latent_type,
+            "latent_options": latent_options,
+            "decoder_options": decoder_options,
+            "scaling_factor": self._scaling_factor,
+            "dtype": self._dtype}
+
+        # Carry over the final-mixture options, if the model has them.
+        if self._gmm_final_options is not None:
+            config["gmm_final"] = self._gmm_final_options
+
+        # Point at the same gene list the model was built from. If the
+        # model was not built from a file, write the genes to a sidecar
+        # next to the configuration so the pruned model is still
+        # self-contained.
+        if self._genes_txt_file is not None:
+            config["genes_txt_file"] = self._genes_txt_file
+        else:
+            genes_txt_file = \
+                os.path.join(
+                    os.path.dirname(os.path.abspath(config_model_pruned)),
+                    "genes_pruned.txt")
+            with open(genes_txt_file, "w") as fh:
+                fh.write("\n".join(self._genes) + "\n")
+            config["genes_txt_file"] = genes_txt_file
+
+        return config
 
 
     def train(self,
