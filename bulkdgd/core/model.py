@@ -7637,10 +7637,66 @@ class BulkDGD(nn.Module):
         """
 
         # Get a copy of the options, so that the model's own are not
-        # modified by reading them.
+        # modified by reading them, and add what the fit itself is
+        # allowed to move - the two live in different sections of the
+        # configuration, and the fitting takes them together.
         options = dict(self._gmm_final_options)
 
-        # Get the type of covariance the final mixture should have.
+        options.setdefault("fit",
+                           config_final.get("fit", "covariance_only"))
+
+        options.setdefault("max_iter",
+                           config_final.get("max_iter", 1000))
+
+        # Fit the mixture to the representations training arrived at.
+        self._latent_final = \
+            self._fit_gmm_to_reps(reps = reps_train,
+                                  options = options)
+
+        # Save the final mixture's parameters, to its own file.
+        self._latent_final.save(\
+            _internals.uniquify_file_path(gmm_final_pth_file))
+
+        # Inform the user that the parameters were saved, and that the
+        # prior is still the prior.
+        logger.info(
+            "The final Gaussian mixture model (covariance type: "
+            f"'{options.get('covariance_type')}', shrinkage: "
+            f"{options.get('shrinkage', 0.0)}, fit: "
+            f"'{options['fit']}') was successfully saved in "
+            f"'{gmm_final_pth_file}'. The prior the model was "
+            "trained with is unchanged.")
+
+
+    def _fit_gmm_to_reps(self,
+                         reps: torch.Tensor,
+                         options: dict[str, object]):
+        """Fit a Gaussian mixture model to a set of representations,
+        and return it.
+
+        This is the fitting that both the final mixture written at the
+        end of training and :meth:`fit_gmm` go through, so that a
+        mixture fitted after the fact is fitted exactly as one fitted
+        during training would have been.
+
+        Parameters
+        ----------
+        reps : :class:`torch.Tensor`
+            The representations to fit the mixture to.
+
+        options : :class:`dict`
+            The options for the fit - the covariance's type and
+            shrinkage, the regularization added to its diagonal, what
+            the fit is allowed to move, and how many iterations it may
+            take.
+
+        Returns
+        -------
+        gmm
+            The fitted Gaussian mixture model.
+        """
+
+        # Get the type of covariance the mixture should have.
         covariance_type = options.get("covariance_type")
 
         # If no covariance type was given
@@ -7678,17 +7734,17 @@ class BulkDGD(nn.Module):
         #-------------------------------------------------------------#
 
         # Get what the fit is allowed to move.
-        fit = config_final.get("fit", "covariance_only")
+        fit = options.get("fit", "covariance_only")
 
         # If only the covariance is refitted
         if fit == "covariance_only":
 
             # Refit it, with the means and the weights frozen where
             # training left them.
-            self._latent_final = \
+            return \
                 latents.fit_final_gmm(\
                     gmm = self.latent,
-                    reps = reps_train,
+                    reps = reps,
                     covariance_type = covariance_type,
                     shrinkage = shrinkage,
                     reg_covar = options.get("reg_covar"))
@@ -7721,11 +7777,11 @@ class BulkDGD(nn.Module):
 
             # Fit the copy to the final representations.
             gmm_final.fit(\
-                reps_train,
-                max_iter = config_final.get("max_iter", 1000))
+                reps,
+                max_iter = options.get("max_iter", 1000))
 
-            # Save it in the model's attributes.
-            self._latent_final = gmm_final
+            # Return it.
+            return gmm_final
 
         # Otherwise
         else:
@@ -7737,21 +7793,219 @@ class BulkDGD(nn.Module):
                 "covariance_only, full_em."
             raise ValueError(errstr)
 
+
+    def fit_gmm(self,
+                input_reps: Union[str, pd.DataFrame,
+                                  list[Union[str, pd.DataFrame]]],
+                config_fit: dict[str, object]) -> "BulkDGD":
+        """Fit a new Gaussian mixture model to a trained model's
+        representations, and return a new model that uses it.
+
+        The mixture a model is trained with is a PRIOR: it is what the
+        representations were pulled towards while they were being
+        learnt, and it is deliberately simple, because a prior that
+        describes the data too well stops pulling. Once training is
+        over the representations are where they are, and the mixture
+        that best describes WHERE THEY ENDED UP is a different, and
+        generally a richer, one.
+
+        This fits that mixture, after the fact and without retraining
+        anything: the decoder is untouched, and so is the prior in the
+        file it was saved to. Both the fitted mixture and a
+        configuration that rebuilds the new model are written, so the
+        result can be loaded again like any other model.
+
+        Fit it to the representations the model was TRAINED on. A
+        mixture fitted to the representations of the samples it is
+        about to be used on has been told the answer.
+
+        Parameters
+        ----------
+        input_reps : :class:`str`, :class:`pandas.DataFrame`, or a \
+            :class:`list` of either
+            The representations to fit the mixture to. Each may be a
+            path to a CSV file (samples on the rows, the latent
+            dimensions in columns named ``latent_dim_*``) or an
+            in-memory :class:`pandas.DataFrame` in the same format.
+
+        config_fit : :class:`dict`
+            The configuration for the fit. The keys are:
+
+            * ``"gmm_new_pth_file"`` (:class:`str`) - the file where
+              the fitted mixture's parameters will be written.
+
+            * ``"config_model_new"`` (:class:`str`) - the YAML file
+              where the new model's configuration will be written.
+
+            * ``"dec_pth_file"`` (:class:`str`, optional) - the file
+              with the trained decoder's parameters, which the new
+              model reuses unchanged. It defaults to the one the
+              model's own configuration points at.
+
+            * ``"gmm_options"`` (:class:`dict`) - the options for the
+              fit:
+
+              - ``"covariance_type"`` (:class:`str`): the covariance
+                the new mixture is to have. There is no default: a
+                mixture fitted after training is being asked for a
+                covariance the prior did not have, and which one is
+                the whole of the request.
+              - ``"shrinkage"`` (:class:`float`, optional): how far
+                each component's covariance is pulled towards the one
+                shared by all of them. A ``"full"`` covariance needs a
+                non-zero value, since each component would otherwise
+                estimate a full covariance matrix from the samples it
+                alone collected.
+              - ``"reg_covar"`` (:class:`float`, optional): the value
+                added to the diagonal of the covariance.
+              - ``"fit"`` (:class:`str`, optional):
+                ``"covariance_only"`` refits the covariance and leaves
+                the means and the weights where training left them, so
+                the components
+                are still the ones anything downstream was labelled
+                against. ``"full_em"`` re-estimates everything, and
+                the components are then NOT the prior's. It defaults
+                to ``"covariance_only"``.
+              - ``"max_iter"`` (:class:`int`, optional): the
+                iterations a ``"full_em"`` fit may take.
+
+        Returns
+        -------
+        model : :class:`BulkDGD`
+            A new model with the fitted mixture and the trained
+            decoder. Its files have already been written, so it can
+            also be rebuilt from them later.
+        """
+
+        # Get the required paths from the configuration.
+        gmm_new_pth_file = config_fit["gmm_new_pth_file"]
+        config_model_new = config_fit["config_model_new"]
+
+        # Get the options for the fit.
+        options = dict(config_fit.get("gmm_options") or {})
+
+        # Get the trained decoder's parameters, which the new model
+        # reuses as they are - only the mixture is refitted.
+        dec_pth_file = \
+            config_fit.get(
+                "dec_pth_file",
+                self._decoder_initial_options.get("decoder_pth_file"))
+
+        # If there are none
+        if dec_pth_file is None:
+
+            # Raise an error, rather than writing out a model whose
+            # decoder is untrained as if it were trained.
+            raise ValueError(
+                "No trained decoder's parameters were given, and the "
+                "model's configuration points at none. Pass "
+                "'dec_pth_file' in the configuration for the fit.")
+
         #-------------------------------------------------------------#
 
-        # Save the final mixture's parameters, to its own file.
-        self._latent_final.save(\
-            _internals.uniquify_file_path(gmm_final_pth_file))
+        # Load the representations the mixture is to be fitted to.
+        reps = self._load_reps(input_reps = input_reps,
+                               latent_dim = self.latent.dim)
 
-        # Inform the user that the parameters were saved, and that the
-        # prior is still the prior.
-        info_msg = \
-            "The final Gaussian mixture model " \
-            f"(covariance type: '{covariance_type}', shrinkage: " \
-            f"{shrinkage}, fit: '{fit}') was successfully saved in " \
-            f"'{gmm_final_pth_file}'. The prior the model was " \
-            "trained with is unchanged."
-        logger.info(info_msg)
+        logger.info(
+            f"The mixture will be fitted to {len(reps):,} "
+            "representations.")
+
+        # Put them on the device, and in the precision, the mixture
+        # lives in.
+        reps = torch.tensor(reps,
+                            device = self.device,
+                            dtype = self.latent.means.dtype)
+
+        #-------------------------------------------------------------#
+
+        # Fit the mixture - the same fitting the one written at the
+        # end of training goes through.
+        gmm_new = self._fit_gmm_to_reps(reps = reps,
+                                        options = options)
+
+        #-------------------------------------------------------------#
+
+        # Write the fitted mixture's parameters.
+        os.makedirs(
+            os.path.dirname(os.path.abspath(gmm_new_pth_file)),
+            exist_ok = True)
+
+        gmm_new.save(gmm_new_pth_file)
+
+        #-------------------------------------------------------------#
+
+        # Assemble the new model's configuration and write it. The
+        # latent space is the one just fitted, whose covariance is not
+        # the prior's, so the configuration has to say so - a model
+        # rebuilt with the prior's shape would refuse the file it is
+        # pointed at.
+        config = self._get_config_for_rebuilding()
+
+        config["latent_options"]["covariance_type"] = \
+            options.get("covariance_type")
+
+        config["latent_options"]["latent_pth_file"] = gmm_new_pth_file
+
+        config["decoder_options"]["decoder_pth_file"] = dec_pth_file
+
+        os.makedirs(
+            os.path.dirname(os.path.abspath(config_model_new)),
+            exist_ok = True)
+
+        with open(config_model_new, "w") as fh:
+            yaml.safe_dump(config, fh, sort_keys = False)
+
+        logger.info(
+            f"The fitted mixture was written to '{gmm_new_pth_file}' "
+            f"and '{config_model_new}'. The prior the model was "
+            "trained with is unchanged.")
+
+        #-------------------------------------------------------------#
+
+        # Return a model built from what was just written.
+        return self.__class__(**config, device = str(self.device))
+
+
+    def _get_config_for_rebuilding(self) -> dict[str, object]:
+        """Get a configuration that rebuilds this model, apart from
+        the files its trained parameters live in.
+
+        Returns
+        -------
+        config : :class:`dict`
+            The configuration.
+        """
+
+        # Assemble what the model was built from.
+        config = {
+            "latent_dim" : int(self.latent.dim),
+            "latent_type" : self._latent_type,
+            "latent_options" : \
+                copy.deepcopy(self._latent_initial_options),
+            "decoder_options" : \
+                copy.deepcopy(self._decoder_initial_options),
+            "scaling_factor" : self._scaling_factor,
+            "dtype" : self._dtype}
+
+        #-------------------------------------------------------------#
+
+        # Carry over the final mixture's options, if the model has any.
+        if self._gmm_final_options is not None:
+
+            config["gmm_final"] = \
+                copy.deepcopy(self._gmm_final_options)
+
+        # Point at the gene list the model was built from, if it was
+        # built from one.
+        if self._genes_txt_file is not None:
+
+            config["genes_txt_file"] = self._genes_txt_file
+
+        #-------------------------------------------------------------#
+
+        # Return the configuration.
+        return config
 
 
     def prune(self,
@@ -7912,8 +8166,8 @@ class BulkDGD(nn.Module):
 
         # Assemble the probe set: every representation passed in, plus a
         # handful of jittered copies.
-        z_real = self._load_reps_for_pruning(input_reps = input_reps,
-                                             latent_dim = latent_dim)
+        z_real = self._load_reps(input_reps = input_reps,
+                                 latent_dim = latent_dim)
 
         rng = np.random.default_rng(seed)
         sd_per_dim = z_real.std(axis = 0, keepdims = True)
@@ -8106,20 +8360,20 @@ class BulkDGD(nn.Module):
         return self.__class__(**pruned_config, device = device)
 
 
-    def _load_reps_for_pruning(
+    def _load_reps(
             self,
             input_reps: Union[str, pd.DataFrame,
                               list[Union[str, pd.DataFrame]]],
             latent_dim: int) -> np.ndarray:
-        """Load the probe representations for :meth:`prune` into one
-        array of latent points, from CSV file(s) and/or
-        :class:`pandas.DataFrame`(s).
+        """Load representations into one array of latent points, from
+        CSV file(s) and/or :class:`pandas.DataFrame`(s).
 
         Parameters
         ----------
         input_reps : :class:`str`, :class:`pandas.DataFrame`, or a \
             :class:`list` of either
-            The representations, as passed to :meth:`prune`.
+            The representations, as passed to :meth:`prune` or
+            :meth:`fit_gmm`.
 
         latent_dim : :class:`int`
             The expected number of latent dimensions.
@@ -8149,9 +8403,10 @@ class BulkDGD(nn.Module):
 
             if not cols:
                 raise ValueError(
-                    "No 'latent_dim_*' columns were found in one of the "
-                    "representations passed to 'prune'. Pass the "
-                    "representations as written by 'get_representations'.")
+                    "No 'latent_dim_*' columns were found in one of "
+                    "the representations passed. Pass the "
+                    "representations as written by "
+                    "'get_representations'.")
 
             frames.append(df[cols].to_numpy(dtype = "float64"))
 
