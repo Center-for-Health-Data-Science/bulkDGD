@@ -1275,7 +1275,9 @@ class BulkDGD(nn.Module):
                       latent_lambda: Optional[float] = None,
                       genes_mask: Optional[torch.Tensor] = None,
                       contamination: float = 0.0,
-                      contamination_r: float = 0.05) -> \
+                      contamination_r: float = 0.05,
+                      noise_type: Optional[str] = None,
+                      noise_options: Optional[dict] = None) -> \
                         torch.Tensor:
         """Optimize the representation(s) found for each sample.
 
@@ -1333,6 +1335,26 @@ class BulkDGD(nn.Module):
         
         latent_lambda : :class:`float`, optional
             The weight of the latent loss term in the total loss.
+
+        noise_type : :class:`str`, optional
+            The type of noise to inject into the representations while
+            they are being optimized. Only ``"gaussian"`` does
+            anything; :obj:`None`, the default, injects nothing.
+
+            This is the same perturbation the decoder's own training
+            applies to its training representations, and it is off by
+            default here on purpose: a representation config written
+            before this existed has to keep producing the
+            representations it produced then.
+
+        noise_options : :class:`dict`, optional
+            The options for the noise, with the same meaning as the
+            ``train_noise_options`` of training: ``scale`` (the base
+            scale, zero disables), ``start`` and ``end`` (the
+            multipliers the scale is annealed between, cosine, over
+            this optimization's epochs), ``within_radius_prob`` (the
+            probability defining the hypersphere the noise is
+            normalized against) and ``gain``.
 
         Returns
         -------
@@ -1406,12 +1428,81 @@ class BulkDGD(nn.Module):
 
         #-------------------------------------------------------------#
 
+        # Unpack the noise options once, rather than once an epoch.
+        #
+        # The perturbation is the one training applies to its own
+        # representations - same options, same annealing, same
+        # normalization - so that "noise" means one thing in this
+        # package and not two. What differs is the default: training
+        # injects noise because its representations are being learned
+        # alongside the decoder, whereas here the decoder is fixed and
+        # the representations are an inference, so a config that says
+        # nothing about noise gets none.
+        noise_options = noise_options or {}
+
+        # Only Gaussian noise is implemented; anything else, including
+        # the default None, disables it.
+        noise_enabled = (noise_type == "gaussian")
+
+        # The base scale. Zero disables the injection just as surely as
+        # a null noise type, which is how training spells "off" too.
+        noise_scale_base = \
+            float(noise_options.get("scale", 0.0)) if noise_enabled \
+            else 0.0
+
+        if noise_scale_base > 0:
+
+            noise_start = float(noise_options["start"])
+            noise_end = float(noise_options["end"])
+            noise_gain = float(noise_options["gain"])
+
+            # The radius of the hypersphere holding the given fraction
+            # of the mass, which the noise is divided by so that its
+            # size means the same thing in any latent dimensionality.
+            # It does not depend on the epoch, so it is computed once.
+            noise_radius = \
+                float(chi2.ppf(
+                    float(noise_options["within_radius_prob"]),
+                    self.latent.dim)) ** 0.5
+
+            logger.info(
+                f"Optimization number {opt_num} will inject Gaussian "
+                f"noise into the representations (scale "
+                f"{noise_scale_base}, annealed from {noise_start} to "
+                f"{noise_end}).")
+
+        #-------------------------------------------------------------#
+
         # Inform the user that the optimization is starting
         info_msg = f"Starting optimization number {opt_num}..."
         logger.info(info_msg)
 
         # For each epoch
         for epoch in range(1, epochs+1):
+
+            # Get the scale of the noise to inject this epoch, cosine-
+            # annealed between 'start' and 'end' across the
+            # optimization, exactly as training anneals its own.
+            #
+            # Annealing is over THIS optimization's epochs. The two
+            # optimizations of the two-step scheme are annealed
+            # separately, because each is its own descent: the first
+            # explores from many candidates and the second refines the
+            # one that won, and a schedule shared across both would
+            # still be injecting the first one's noise into the second.
+            if noise_scale_base > 0:
+
+                progress = (epoch - 1) / max(epochs - 1, 1)
+
+                noise_scale = \
+                    noise_end + (noise_start - noise_end) * 0.5 * \
+                        (1 + math.cos(math.pi * progress))
+
+                noise_scale = noise_scale * noise_scale_base
+
+            else:
+
+                noise_scale = 0.0
 
             # Mark the CPU start time of the epoch.
             time_start_epoch_cpu = time.process_time()
@@ -1537,6 +1628,23 @@ class BulkDGD(nn.Module):
                                     n_rep_per_comp * \
                                     n_components,
                                   dim)
+
+                    #-----------------------------------------------------#
+
+                    # Inject the noise, if any was asked for.
+                    #
+                    # It is added to the value the decoder sees, not to
+                    # the representation itself: the parameter being
+                    # optimized keeps its own value, and what the
+                    # gradient is taken through is a perturbed copy of
+                    # it. That is what training does, and it is the
+                    # difference between a representation that is
+                    # noisy and a representation optimized to be robust
+                    # to noise - the second is what is wanted.
+                    if noise_scale > 0:
+
+                        z = z + noise_scale * noise_gain * \
+                                torch.randn_like(z) / noise_radius
 
                     #-----------------------------------------------------#
 
@@ -2685,285 +2793,6 @@ class BulkDGD(nn.Module):
         return best_reps
 
 
-    def _get_representations_one_opt(
-            self,
-            dataset: dataclasses.GeneExpressionDataset,
-            config: dict[str, object],
-            genes_mask: Optional[torch.Tensor] = None) -> \
-                torch.Tensor:
-        """Get the representations for a set of samples by
-        initializing ``n_rep_per_comp`` representations per each
-        component of the Gaussian mixture model per sample, selecting
-        the best representation for each sample, and optimizing these
-        representations.
-
-        Parameters
-        ----------
-        dataset : \
-            :class:`bulkdgd.core.dataclasses.GeneExpressionDataset`
-            The dataset from which the data loader should be created.
-
-        config : :class:`dict`
-            A dictionary with the options to run the optimization.
-
-        Returns
-        -------
-        rep : :class:`torch.Tensor`
-            A tensor containing the optimized representations.
-
-            This is a 2D tensor where:
-
-            - The first dimension has a length equal to the number
-              of samples.
-
-            - The second dimension has a length equal to the
-              dimensionality of the latent space where the
-              representations live.
-
-        pred_means : :class:`torch.Tensor`
-            A tensor containing the predicted means of the
-            distributions modelling the genes' counts.
-
-            This is a 2D tensor where:
-
-            - The first dimension has a length equal to the number
-              of samples.
-
-            - The second dimension has a length equal to the
-              dimensionality of the gene space.
-
-            If the genes counts are modelled using negative binomial
-            distributions, the predicted means are scaled by the
-            corresponding distributions' r-values.
-
-        pred_r_values : :class:`torch.Tensor` or :obj:`None`
-            A tensor containing the predicted r-values of the negative
-            binomial distributions modelling the genes' counts, if
-            the counts are modelled by negative binomial distributions.
-
-            This is a 2D tensor where:
-
-            - The first dimension has a length equal to the number
-              of samples.
-
-            - The second dimension has a length equal to the
-              dimensionality of the gene space.
-
-            ``pred_r_values`` is :obj:`None` if the counts are modelled
-            by Poisson distributions.
-
-        time_opt : :class:`list`
-            A list of tuples storing, for each epoch, information
-            about the CPU and wall clock time used by the entire
-            epoch and by the backpropagation step run within the
-            epoch.
-        """
-
-        # Get the number of samples from the length of the dataset.
-        n_samples = len(dataset)
-
-        # Get the options for the data loader.
-        data_loader_options = config["data_loader_options"]
-
-        # Get the number of representations per component per sample.
-        n_rep_per_comp = config["n_rep_per_comp"]
-
-        # Get the options for the loss reporting.
-        loss_reporting_options = config["reporting_options"]["loss"]
-
-        # Get the method to reduce the loss across the samples in the
-        # batch.
-        loss_reduction_type = \
-            config["scheme_options"]["loss_reduction_type"]
-
-        # Get the type of optimizer.
-        optimizer_type = \
-            config["scheme_options"]["optimization"]["optimizer_type"]
-
-        # Get the options for the optimizer.
-        optimizer_options = \
-            config["scheme_options"]["optimization"][
-                "optimizer_options"]
-
-        # Get the number of epochs to run the optimization for.
-        epochs = config["scheme_options"]["optimization"]["epochs"]
-
-        #-------------------------------------------------------------#
-
-        # Create the data loader.
-        data_loader = \
-            _util.get_data_loader(dataset = dataset,
-                                  config = data_loader_options)
-
-        #-------------------------------------------------------------#
-
-        # Get the initial values for the representations by sampling
-        # from the latent space.
-
-        # If the latent space is the legacy Gaussian mixture model
-        if isinstance(self.latent,
-                      latents.GaussianMixtureModelLegacy):
-
-            # Sample new points from the GMM.
-            rep_init = \
-                self.latent.sample_new_points(\
-                    n_points = n_samples, 
-                    sampling_method = "mean",
-                    n_samples_per_comp = n_rep_per_comp)
-            
-            # Set the latent lambda to None.
-            latent_lambda = None
-
-        # If the latent space is the TorchGMM wrapper
-        elif isinstance(self.latent,
-                        latents.GaussianMixtureModelTGMM):
-
-            # Get the number of components.
-            n_components = self.latent.n_components
-            
-            # Get the dimensionality.
-            n_dim = self.latent.dim
-
-            # Get the latent lambda from the configuration.
-            latent_lambda = \
-                config["scheme_options"][
-                    "latent_loss_calculation"]["lambda"]
-
-            # Initialize a list to store the samples from each
-            # component.
-            component_samples = []
-            
-            # For each component
-            for comp_idx in range(n_components):
-                
-                # Sample n_samples * n_rep_per_comp points from this
-                # component.
-                samples_comp, _ = self.latent.sample(
-                    n_samples = n_samples * n_rep_per_comp,
-                    component = comp_idx)
-
-                # Add the samples to the list.
-                component_samples.append(samples_comp)
-            
-            # Stack all component samples: shape (n_components,
-            # n_samples * n_rep_per_comp, n_dim).
-            component_samples = torch.stack(component_samples,
-                                            dim = 0)
-            
-            # Reshape to (n_components, n_samples, n_rep_per_comp,
-            # n_dim).
-            component_samples = component_samples.view(n_components,
-                                                       n_samples,
-                                                       n_rep_per_comp,
-                                                       n_dim)
-            
-            # Permute to (n_samples, n_rep_per_comp, n_components,
-            # n_dim).
-            component_samples = component_samples.permute(1, 2, 0, 3)
-            
-            # Flatten to final shape (n_samples * n_rep_per_comp * 
-            # n_components, n_dim).
-            rep_init = \
-                component_samples.reshape(
-                    n_samples * n_rep_per_comp * n_components,
-                    n_dim)
-
-        #-------------------------------------------------------------#
-
-        # How much of a sample the model is allowed to give up on.
-        #
-        # Zero - the default - is the plain negative binomial, which is
-        # what every representation before July 2026 was found with. A
-        # small value bounds what a gene the model cannot reach may do
-        # to the representation, which matters for a TUMOUR because the
-        # genes it cannot reach are the aberrant ones and letting them
-        # place the representation returns a counterfactual that has
-        # already absorbed part of the signal. See
-        # 'OutputModuleNBFullDispersion.loss'.
-        contamination = \
-            float(config["scheme_options"].get("contamination", 0.0))
-
-        contamination_r = \
-            float(config["scheme_options"].get("contamination_r", 0.05))
-
-        if contamination:
-
-            log.info(
-                f"Representations will be found with a contaminated "
-                f"negative binomial (contamination "
-                f"{contamination:.2e}, r {contamination_r:g}).")
-
-        # Create a representation layer containing the initialized
-        # representations.
-        rep_layer_init = \
-            latents.RepresentationLayer(values = rep_init).to(\
-                self.device)
-
-        #-------------------------------------------------------------#
-
-        # Select the best representation for each sample among those
-        # initialized (we initialized at least one per sample per
-        # component).
-        rep_best = \
-            self._select_best_rep(\
-                data_loader = data_loader,
-                rep_layer = rep_layer_init,
-                n_rep_per_comp = n_rep_per_comp,
-                loss_reduction_type = loss_reduction_type,
-                latent_lambda = latent_lambda,
-                genes_mask = genes_mask,
-                contamination = contamination,
-                contamination_r = contamination_r)
-
-        # Create a representation layer containing the best
-        # representations found.
-        rep_layer_best = \
-            latents.RepresentationLayer(values = rep_best).to(\
-                self.device)
-
-        #-------------------------------------------------------------#
-        
-        # Get the optimizer for the optimization.
-        optimizer = \
-            self._get_optimizer(\
-                optimizer_type = optimizer_type,
-                optimizer_options = optimizer_options,
-                optimizer_parameters = rep_layer_best.parameters())
-
-        #-------------------------------------------------------------#
-
-        # Get the optimized representations, the predicted means of
-        # the distributions modelling the counts, the predicted
-        # r-values of the distributions modelling the counts (if any),
-        # and the time data.
-        rep, pred_means, pred_r_values, time = \
-            self._optimize_rep(\
-                data_loader = data_loader,
-                rep_layer = rep_layer_best,
-                optimizer = optimizer,
-                n_components = 1,
-                n_rep_per_comp = 1,
-                loss_reporting_options = loss_reporting_options,
-                loss_reduction_type = loss_reduction_type,
-                epochs = epochs,
-                opt_num = 1,
-                latent_lambda = latent_lambda,
-                genes_mask = genes_mask,
-                contamination = contamination,
-                contamination_r = contamination_r)
-
-        #-------------------------------------------------------------#
-
-        # Make the gradients zero.
-        optimizer.zero_grad()
-
-        #-------------------------------------------------------------#
-
-        # Return the representations, the predicted means and r-values,
-        # the time data.
-        return rep, pred_means, pred_r_values, time
-
-
     def _get_representations_two_opt(
             self,
             dataset: dataclasses.GeneExpressionDataset,
@@ -3077,6 +2906,13 @@ class BulkDGD(nn.Module):
         # Get the number of epochs to run the first optimization for.
         epochs_1 = config_opt_1["epochs"]
 
+        # Get the noise to inject into the representations during the
+        # first optimization. Absent from the configuration means none,
+        # which is what every configuration written before this option
+        # existed says.
+        noise_type_1 = config_opt_1.get("noise_type")
+        noise_options_1 = config_opt_1.get("noise_options")
+
         #-------------------------------------------------------------#
 
         # Get the configuration for the second optimization.
@@ -3091,6 +2927,13 @@ class BulkDGD(nn.Module):
 
         # Get the number of epochs to run the second optimization for.
         epochs_2 = config_opt_2["epochs"]
+
+        # Get the noise to inject into the representations during the
+        # second optimization, independently of the first: the second
+        # refines a single winner and may well want less noise, or
+        # none, where the first was still exploring.
+        noise_type_2 = config_opt_2.get("noise_type")
+        noise_options_2 = config_opt_2.get("noise_options")
 
         #-------------------------------------------------------------#
 
@@ -3310,7 +3153,9 @@ class BulkDGD(nn.Module):
                 latent_lambda = latent_lambda,
                 genes_mask = genes_mask,
                 contamination = contamination,
-                contamination_r = contamination_r)
+                contamination_r = contamination_r,
+                noise_type = noise_type_1,
+                noise_options = noise_options_1)
 
         #-------------------------------------------------------------#
 
@@ -3390,7 +3235,9 @@ class BulkDGD(nn.Module):
                 latent_lambda = latent_lambda,
                 genes_mask = genes_mask,
                 contamination = contamination,
-                contamination_r = contamination_r)
+                contamination_r = contamination_r,
+                noise_type = noise_type_2,
+                noise_options = noise_options_2)
 
         #-------------------------------------------------------------#
 
@@ -7169,17 +7016,30 @@ class BulkDGD(nn.Module):
 
         #-------------------------------------------------------------#
 
-        # If the user selected the one-optimization scheme
-        if opt_scheme == "one_opt":
-
-            # Select the corresponding method.
-            opt_method = self._get_representations_one_opt
-
         # If the user selected the two-optimizations scheme
-        elif opt_scheme == "two_opt":
+        #
+        # This is the only scheme. A 'one_opt' scheme - one optimization
+        # over the candidates, with no selection step and no second
+        # descent - was retired, having produced no result in this
+        # project while still having to be kept working.
+        #
+        # The dispatch is kept rather than inlined: adding a scheme
+        # should be adding a branch here and a case to 'CONFIG_REP',
+        # not rebuilding how a scheme is chosen.
+        if opt_scheme == "two_opt":
 
             # Select the corresponding method.
             opt_method = self._get_representations_two_opt
+
+        # If it is a scheme this version does not implement
+        else:
+
+            # Say so, rather than leaving 'opt_method' unbound for the
+            # call below to fail on with a NameError that names
+            # nothing.
+            raise ValueError(
+                f"Unsupported optimization scheme '{opt_scheme}'. "
+                f"The only scheme is 'two_opt'.")
 
         #-------------------------------------------------------------#
             

@@ -10,10 +10,12 @@
 # Type: str.
 #
 # Options:
-# - 'one_opt' for the optimization scheme with only one round of
-#   optimization.
 # - 'two_opt' for the optimization scheme with two rounds of
 #   optimization.
+#
+# 'two_opt' is currently the only scheme. A 'one_opt' scheme, with a
+# single round of optimization and no selection step between rounds,
+# was retired.
 scheme_type: two_opt
 
 
@@ -123,6 +125,40 @@ scheme_options:
     # Type: int.
     epochs: 10
 
+    # Set the type of noise to inject into the representations while
+    # they are being optimized, and the options for that noise.
+    #
+    # This is the same perturbation, under the same options, that the
+    # decoder's training applies to its own representations. Unlike
+    # training's, it is OFF unless set here: the decoder is fixed when
+    # representations are found, and a representation is an inference
+    # about a sample, so a configuration that says nothing about noise
+    # finds the representation it would have found before this option
+    # existed.
+    #
+    # Each round is annealed over its OWN epochs, and each is set
+    # separately - the first round explores from many candidates and
+    # the second refines the one that won, so they need not be
+    # perturbed by the same amount.
+    #
+    # Uncomment to enable.
+    #
+    # Type: str. Options: 'gaussian'.
+    #noise_type: gaussian
+    #noise_options:
+    #  # The base scale of the noise. Zero disables the injection.
+    #  scale: 0.1
+    #  # The multipliers the scale is cosine-annealed between, from
+    #  # this round's first epoch to its last.
+    #  start: 1.0
+    #  end: 0.01
+    #  # The probability defining the hypersphere the noise is
+    #  # normalized against, so that a scale means the same thing
+    #  # whatever the dimensionality of the latent space.
+    #  within_radius_prob: 0.95
+    #  # A final multiplier on the noise.
+    #  gain: 1.0
+
     # Set the options for the optimizer.
     optimizer:
 
@@ -164,6 +200,18 @@ scheme_options:
     #
     # Type: int.
     epochs: 50
+
+    # Set the noise for this round, independently of the first. See
+    # 'optimization_1' above for what the options mean. Off unless set.
+    #
+    # Type: str. Options: 'gaussian'.
+    #noise_type: gaussian
+    #noise_options:
+    #  scale: 0.1
+    #  start: 1.0
+    #  end: 0.01
+    #  within_radius_prob: 0.95
+    #  gain: 1.0
 
     # Set the options for the optimizer.
     optimizer:

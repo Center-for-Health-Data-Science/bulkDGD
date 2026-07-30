@@ -1458,10 +1458,82 @@ _REP_OPTIMIZATION = {
         "type": (bool,),
         "default": False,
         },
-    
+
+    # The type of noise to add to the representations while they are
+    # being optimized - the same perturbation training applies to its
+    # own representations, under the same options.
+    #
+    # It defaults to OFF, unlike training's, and deliberately: the
+    # decoder is fixed here and the representation is an inference
+    # about a sample, so a configuration that says nothing about noise
+    # must keep finding the representation it found before this option
+    # existed.
+    # 'none' is a CHOICE and not only the default. Validation happens
+    # more than once on the way to a representation - the config is
+    # parsed when it is loaded and parsed again inside
+    # 'get_representations' - and the second pass sees the key the
+    # first pass filled in. If the default were not also a legal value,
+    # every config that says nothing about noise would load and then be
+    # rejected, which is the whole installed base of them.
+    "noise_type" : {
+        "type": (str, type(None)),
+        "choices": ["gaussian", "none"],
+        "default": "none",
+        },
+
+    # The options for that noise, with the same meanings they have in
+    # '_TRAIN_REPRESENTATIONS'. The scale is annealed, cosine, from
+    # 'start' to 'end' across THIS optimization's epochs, and the noise
+    # is divided by the radius of the hypersphere holding
+    # 'within_radius_prob' of the mass so that a scale means the same
+    # thing whatever the latent dimensionality.
+    "noise_options" : {
+        "switch" : {
+            "option" : "noise_type",
+            "cases" : {
+                "gaussian" : {
+
+                    "scale" : {
+                        "type": (float, int),
+                        "condition": lambda v: v >= 0,
+                        "message": "must be a non-negative number",
+                        "default": 0.0,
+                        },
+
+                    "start" : {
+                        "type": (float, int),
+                        "condition": lambda v: v >= 0,
+                        "message": "must be a non-negative number",
+                        "default": 1.0,
+                        },
+
+                    "end" : {
+                        "type": (float, int),
+                        "condition": lambda v: v >= 0,
+                        "message": "must be a non-negative number",
+                        "default": 0.01,
+                        },
+
+                    "within_radius_prob" : {
+                        "type": (float, int),
+                        "condition": lambda v: 0 <= v <= 1,
+                        "message": "must be a number between 0 and 1",
+                        "default": 0.95,
+                        },
+
+                    "gain" : {
+                        "type": (float, int),
+                        "condition": lambda v: v >= 0,
+                        "message": "must be a non-negative number",
+                        "default": 1.0,
+                        },
+                    },
+                },
+            },
+        },
+
     # The options for the optimizer (spread flat, matching how
-    # 'model.BulkDGD._get_representations_one_opt' and
-    # '_get_representations_two_opt' actually read 'optimizer_type'/
+    # '_get_representations_two_opt' actually reads 'optimizer_type'/
     # 'optimizer_options', and matching '_TRAIN_DECODER''s pattern --
     # not nested under an 'optimizer' key).
     **_internals.recursive_add_items(
@@ -1482,96 +1554,6 @@ _REP_OPTIMIZATION = {
             }),
     }
 
-
-#---------------------------------------------------------------------#
-
-
-# Set the template for the options of the optimizers in the 
-# representations configuration for the 'one_opt' scheme when
-# the latent space is the legacy Gaussian mixture model.
-_REP_ONE_OPT_LGMM = {
-    # How much of a sample the model is allowed to give up on when
-    # FINDING A REPRESENTATION. Zero is the plain negative binomial and
-    # is what training uses; a small value bounds what a gene the model
-    # cannot reach may do to the representation, which matters for a
-    # tumour because those genes are the signal. See
-    # 'OutputModuleNBFullDispersion.loss'.
-    "contamination" : {
-        "type": (float, int),
-        "condition": lambda v: 0.0 <= v < 1.0,
-        "message": "must be in [0, 1)",
-        "default": 0.0,
-        },
-
-    # The r-value of the outlier component of that mixture.
-    "contamination_r" : {
-        "type": (float, int),
-        "condition": lambda v: v > 0,
-        "message": "must be a positive number",
-        "default": 0.05,
-        },
-
-
-    # The reduction method to use for the loss.
-    "loss_reduction_type" : {
-        "type": (str,),
-        "choices": ["mean", "sum"],
-        "default": "sum",
-        },
-
-    # The options for the optimization of the representations.
-    "optimization" : _REP_OPTIMIZATION,
-    
-    }
-
-
-# Set the template for the options of the optimizers in the 
-# representations configuration for the 'one_opt' scheme when
-# the latent space is the TorchGMM wrapper.
-_REP_ONE_OPT_TGMM = {
-    # How much of a sample the model is allowed to give up on when
-    # FINDING A REPRESENTATION. Zero is the plain negative binomial and
-    # is what training uses; a small value bounds what a gene the model
-    # cannot reach may do to the representation, which matters for a
-    # tumour because those genes are the signal. See
-    # 'OutputModuleNBFullDispersion.loss'.
-    "contamination" : {
-        "type": (float, int),
-        "condition": lambda v: 0.0 <= v < 1.0,
-        "message": "must be in [0, 1)",
-        "default": 0.0,
-        },
-
-    # The r-value of the outlier component of that mixture.
-    "contamination_r" : {
-        "type": (float, int),
-        "condition": lambda v: v > 0,
-        "message": "must be a positive number",
-        "default": 0.05,
-        },
-
-
-    # The reduction method to use for the loss.
-    "loss_reduction_type" : {
-        "type": (str,),
-        "choices": ["mean", "sum"],
-        "default": "sum",
-        },
-
-    # The options for calculating the loss of the latent space.
-    "latent_loss_calculation" : {
-        "lambda" : {
-            "type": (float, int),
-            "condition": lambda v: v >= 0,
-            "message": "must be a non-negative number",
-            "default": 1.0,
-            },
-        },
-
-    # The options for the optimization of the representations.
-    "optimization" : _REP_OPTIMIZATION,
-
-    }
 
 #---------------------------------------------------------------------#
 
@@ -1905,11 +1887,22 @@ CONFIG_TRAIN = {
 # for a new set of samples.
 CONFIG_REP = {
     
-    # The type of scheme to use for finding the representations for a 
+    # The type of scheme to use for finding the representations for a
     # new set of samples.
+    #
+    # 'two_opt' is the only scheme. There was a 'one_opt' - a single
+    # optimization over candidates drawn from every component, with no
+    # selection step and no second descent - and it was retired: every
+    # result in this project was produced with 'two_opt', so 'one_opt'
+    # was an untested path that still had to be kept working.
+    #
+    # The switch below is left in place with one case rather than
+    # collapsed away, because the point of it is that a scheme can be
+    # added, and adding one should be writing a case and not rebuilding
+    # the dispatch.
     "scheme_type" : {
         "type": (str,),
-        "choices": ["one_opt", "two_opt"],
+        "choices": ["two_opt"],
         },
 
     # The type of latent space used in the model.
@@ -1951,15 +1944,6 @@ CONFIG_REP = {
         "switch" : {
             "option" : "scheme_type",
             "cases" : {
-                "one_opt" : {
-                    "switch" : {
-                        "option" : "latent_type",
-                        "cases" : {
-                            "lgmm" : _REP_ONE_OPT_LGMM,
-                            "tgmm" : _REP_ONE_OPT_TGMM,
-                            },
-                        },
-                    },
                 "two_opt" : {
                     "switch" : {
                         "option" : "latent_type",
