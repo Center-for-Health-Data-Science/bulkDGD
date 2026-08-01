@@ -1697,6 +1697,31 @@ def get_pathways_saliency_map(saliency_map: np.ndarray,
     return pd.DataFrame(pathway_scores).T
 
 
+#---------------------------------------------------------------------#
+
+
+def _save_epoch_df(df, path, sep = ","):
+
+    """Write a per-epoch table, as Parquet or as text.
+
+    The format follows the path's extension. Parquet is what these are
+    written as now: a training run emits one of these per epoch per
+    output, they are the record the run is reconstructed from, and a
+    float64 written to text comes back changed by up to about 1e-12.
+    """
+
+    if str(path).lower().endswith((".parquet", ".pq")):
+
+        df.to_parquet(path,
+                      engine = "pyarrow",
+                      compression = "snappy",
+                      index = True)
+
+    else:
+
+        df.to_csv(path, sep = sep, index = True, header = True)
+
+
 def save_rep_epoch(epoch: int,
                    prefix: str,
                    latent_dim: int,
@@ -1752,13 +1777,11 @@ def save_rep_epoch(epoch: int,
                           columns = columns_names)
     
     # Set the path to the file where the representations will be saved.
-    rep_out = os.path.join(save_dir, f"{prefix}_rep_{epoch}.csv")
+    rep_out = os.path.join(save_dir, f"{prefix}_rep_{epoch}.parquet")
     
     # Save the representations.
-    df_rep.to_csv(rep_out,
-                  sep = ",",
-                  index = True,
-                  header = True)
+    _save_epoch_df(df_rep, rep_out,
+                  sep = ",")
 
 
 def save_latent_probs_epoch(probs: torch.Tensor,
@@ -1816,13 +1839,11 @@ def save_latent_probs_epoch(probs: torch.Tensor,
     # Set the path to the file where the probability densities will be
     # saved.
     probs_out = \
-        os.path.join(save_dir, f"{prefix}_latent_probs_{epoch}.csv")
+        os.path.join(save_dir, f"{prefix}_latent_probs_{epoch}.parquet")
 
     # Save the probability densities for the samples.
-    df_probs.to_csv(probs_out,
-                    sep = ",",
-                    index = True,
-                    header = True)
+    _save_epoch_df(df_probs, probs_out,
+                    sep = ",")
 
 
 def save_latent_means_epoch(epoch: int,
@@ -1875,13 +1896,11 @@ def save_latent_means_epoch(epoch: int,
                             columns = columns_names)
 
     # Set the path to the file where the means will be saved.
-    means_out = os.path.join(save_dir, f"latent_means_{epoch}.csv")
+    means_out = os.path.join(save_dir, f"latent_means_{epoch}.parquet")
 
     # Save the means for the training samples.
-    df_means.to_csv(means_out,
-                    sep = ",",
-                    index = True,
-                    header = True)
+    _save_epoch_df(df_means, means_out,
+                    sep = ",")
 
 
 def save_model_epoch(epoch: int,
@@ -1985,13 +2004,11 @@ def save_genes_saliency_maps_epoch(
 
     # Set the path to the file where the saliency map will be saved.
     saliency_map_out = \
-        os.path.join(save_dir, f"{prefix}_saliency_map_{epoch}.csv")
+        os.path.join(save_dir, f"{prefix}_saliency_map_{epoch}.parquet")
 
     # Save the saliency map.
-    df_saliency_map.to_csv(saliency_map_out,
-                           sep = ",",
-                           index = True,
-                           header = True)
+    _save_epoch_df(df_saliency_map, saliency_map_out,
+                           sep = ",")
 
 
 def save_pathways_saliency_maps_epoch(
@@ -2047,10 +2064,8 @@ def save_pathways_saliency_maps_epoch(
 
     # Set the path to the file where the saliency map will be saved.
     saliency_map_out = \
-        os.path.join(save_dir, f"{prefix}_saliency_map_{epoch}.csv")
+        os.path.join(save_dir, f"{prefix}_saliency_map_{epoch}.parquet")
 
     # Save the saliency map.
-    df_saliency_map.to_csv(saliency_map_out,
-                           sep = ",",
-                           index = True,
-                           header = True)
+    _save_epoch_df(df_saliency_map, saliency_map_out,
+                           sep = ",")
