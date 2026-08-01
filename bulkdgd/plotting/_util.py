@@ -446,7 +446,16 @@ def check_config_plot(config: dict[str, object]) -> \
     """
 
     # Check the configuration.
-    config, errors, _ = parse_config_plot(config = config)
+    config, errors, warnings = parse_config_plot(config = config)
+
+    # SAY WHAT WAS THROWN AWAY. An unrecognized option is pruned rather
+    # than raised on, which is deliberate - but the warning that said so
+    # used to be discarded here, so an option that never reached the
+    # plot looked exactly like one that did. That is how a palette could
+    # be passed, ignored, and never missed.
+    for warn_msg in warnings:
+
+        log.warning(warn_msg)
 
     # Return the configuration and the errors.
     return config, errors
@@ -1914,11 +1923,23 @@ def generate_plots(dfs: list[pd.DataFrame],
     # Get the configuration for the plot's aesthetics by merging the
     # configuration provided (if any) with the keyword arguments (it
     # any).
+    # THE DEFAULTS GO FIRST, because the merge is last-wins.
+    #
+    # They used to go last, which meant they overrode the caller's
+    # 'config' and the caller's keyword arguments for every key the
+    # default file defines - and the default file defines all of them.
+    # A caller could pass a palette, an axis label or a font size, get
+    # no error, and get the default back. Nothing a caller asked for
+    # ever reached a plot.
+    #
+    # The order is now least specific to most specific: the defaults,
+    # then the configuration the caller passed, then the keyword
+    # arguments they named one by one.
     config = \
         _internals.recursive_merge_dicts(\
+            config_default if config_default is not None else {},
             config if config is not None else {},
-            kwargs,
-            config_default if config_default is not None else {})
+            kwargs)
     
     #-----------------------------------------------------------------#
 

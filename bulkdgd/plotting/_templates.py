@@ -92,6 +92,16 @@ CONFIG_PLOT_TEMPLATE = {
 
     #-----------------------------------------------------------------#
 
+    # Set the options for the colors used across the sub-plots.
+    #
+    # 'get_colors' reads this section. It was absent from the template,
+    # so a configuration carrying it was pruned before the plotting saw
+    # it - silently, since the pruning only warns and the warnings were
+    # discarded. There was no way to set a figure's colors at all.
+    "colors" : _defaults.COLORS_OPTIONS,
+
+    #-----------------------------------------------------------------#
+
     # Set the options if the plot is a scatter plot.
     "scatterplot" : _defaults.SCATTERPLOT_OPTIONS,
 

@@ -2263,6 +2263,56 @@ LINEPLOT_OPTIONS = {
 #######################################################################
 
 
+# Set the supported options for the colors used across a figure's
+# sub-plots.
+#
+# 'get_colors' has always read these, but they were in no template, so
+# 'parse_config_plot' pruned them out of any configuration that carried
+# them and the plot fell back to the default color map. A caller could
+# pass a palette and get husl.
+COLORS_OPTIONS = {
+
+    # A single color, used for every sub-plot.
+    "color" : \
+
+       {# Set the supported data types.
+        "dtypes" : (str,),
+        # Set a help string.
+        "help" : \
+            "A single color, used for every sub-plot.",
+        },
+
+    #-----------------------------------------------------------------#
+
+    # An explicit list of colors.
+    "colors" : \
+
+       {# Set the supported data types.
+        "dtypes" : (list,),
+        # Set a help string.
+        "help" : \
+            "The colors to use, one per sub-plot. If there are " \
+            "fewer colors than sub-plots, they are cycled.",
+        },
+
+    #-----------------------------------------------------------------#
+
+    # A color map to take the colors from.
+    "cmap" : \
+
+       {# Set the supported data types.
+        "dtypes" : (str,),
+        # Set a help string.
+        "help" : \
+            "The name of a color map the colors are sampled from, " \
+            f"one per sub-plot. More details: {LINKS['colors']}.",
+        },
+    }
+
+
+#######################################################################
+
+
 # Set the supported options for scatter plots.
 SCATTERPLOT_OPTIONS = {
 
