@@ -190,6 +190,14 @@ install_requires = ["dask",
                     "matplotlib",
                     "numpy",
                     "pandas",
+                    # Representations and decoder outputs can be written
+                    # as Parquet, which is the only format the package
+                    # offers that returns a float64 unchanged - text
+                    # round-trips one to within about 1e-12 of itself.
+                    # It is not pinned to an exact version: the values
+                    # a file holds do not depend on the writer, only
+                    # the version string recorded inside it does.
+                    "pyarrow",
                     "requests",
                     "seaborn",
                     "scikit-learn",
