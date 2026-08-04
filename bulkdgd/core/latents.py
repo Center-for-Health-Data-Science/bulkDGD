@@ -1995,6 +1995,20 @@ class RepresentationLayer(nn.Module):
 
         #-------------------------------------------------------------#
 
+        # Record the device BEFORE the representations are created.
+        #
+        # Every sampler below draws on 'self.device', but it used to be
+        # set further down, after the branch that calls them. Passing
+        # any 'dist' therefore raised AttributeError before it could
+        # sample anything, which is why none of the distributions this
+        # class advertises had ever been reachable - only the 'values'
+        # branch, which does not consult the device, worked. Setting it
+        # here is what makes 'dist' usable at all.
+        self._device = torch.device(device) \
+            if device is not None else torch.device("cpu")
+
+        #-------------------------------------------------------------#
+
         # If a tensor of values was passed
         if values is not None:
 

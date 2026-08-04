@@ -1902,7 +1902,7 @@ CONFIG_REP = {
     # the dispatch.
     "scheme_type" : {
         "type": (str,),
-        "choices": ["two_opt"],
+        "choices": ["two_opt", "two_opt_multiseed"],
         },
 
     # The type of latent space used in the model.
@@ -1945,6 +1945,22 @@ CONFIG_REP = {
             "option" : "scheme_type",
             "cases" : {
                 "two_opt" : {
+                    "switch" : {
+                        "option" : "latent_type",
+                        "cases" : {
+                            "lgmm" : _REP_TWO_OPT_LGMM,
+                            "tgmm" : _REP_TWO_OPT_TGMM,
+                            },
+                        },
+                    },
+
+                # The multi-seed scheme takes the same options as the
+                # scheme it runs, because it IS that scheme run once
+                # per seed. The only difference is in
+                # 'initialization', which carries 'seeds' rather than
+                # 'seed'; that block is read with '.get' and is not
+                # validated here, for either scheme.
+                "two_opt_multiseed" : {
                     "switch" : {
                         "option" : "latent_type",
                         "cases" : {

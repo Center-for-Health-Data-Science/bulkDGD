@@ -2179,7 +2179,9 @@ class BulkDGD(nn.Module):
                          genes_mask: \
                             Optional[torch.Tensor] = None,
                          contamination: float = 0.0,
-                         contamination_r: float = 0.05) -> \
+                         contamination_r: float = 0.05,
+                         n_components: \
+                            Optional[int] = None) -> \
                                 torch.Tensor:
         """Select the best representation per sample.
 
@@ -2230,7 +2232,18 @@ class BulkDGD(nn.Module):
         n_samples = len(data_loader.dataset)
 
         # Get the number of components in the Gaussian mixture model.
-        n_components = self.latent.n_components
+        #
+        # A caller may override it. The candidates of a sample are laid
+        # out as 'n_rep_per_comp' * 'n_components' and this method
+        # reshapes by that product, so a layer that already holds ONE
+        # representation per sample - as it does after the second
+        # optimization, when what is wanted is the loss and not a
+        # competition - has to be able to say so. Left alone it is the
+        # mixture's own count, which is what the selection after the
+        # first optimization needs.
+        n_components = \
+            self.latent.n_components if n_components is None \
+            else int(n_components)
 
         # Get the dimensionality of the latent space.
         dim = self.latent.dim
@@ -2793,6 +2806,64 @@ class BulkDGD(nn.Module):
         return best_reps
 
 
+    def _draw_rep_init(self,
+                       n_samples: int,
+                       n_rep_per_comp: int,
+                       seed: Optional[int]) -> torch.Tensor:
+        """Draw the candidate representations for one seed.
+
+        This is the initialization step of the 'two_opt' scheme, pulled
+        out so that a scheme running several seeds can perform it once
+        per seed and get, for each, exactly what a single-seed run of
+        'two_opt' would have started from.
+
+        THE ORDER OF THE DRAWS IS THE CONTRACT. The candidates come from
+        'n_components' successive calls, each consuming the global
+        generator, so a scheme that seeds once and then draws in this
+        same order reproduces a standalone run bit for bit, and one that
+        interleaves seeds or reorders the components does not. Nothing
+        here may be reordered for tidiness.
+        """
+
+        n_components = self.latent.n_components
+
+        n_dim = self.latent.dim
+
+        component_samples = []
+
+        # 'GaussianMixture.sample' draws on the GLOBAL generator and
+        # takes no generator of its own, so the global one is seeded and
+        # its state put back afterwards, exactly as 'two_opt' does.
+        with contextlib.ExitStack() as stack:
+
+            if seed is not None:
+
+                stack.enter_context(
+                    torch.random.fork_rng(devices = []))
+
+                torch.manual_seed(int(seed))
+
+            for comp_idx in range(n_components):
+
+                samples_comp, _ = self.latent.sample(
+                    n_samples = n_samples * n_rep_per_comp,
+                    component = comp_idx)
+
+                component_samples.append(samples_comp)
+
+        component_samples = torch.stack(component_samples, dim = 0)
+
+        component_samples = component_samples.view(n_components,
+                                                   n_samples,
+                                                   n_rep_per_comp,
+                                                   n_dim)
+
+        component_samples = component_samples.permute(1, 2, 0, 3)
+
+        return component_samples.reshape(
+            n_samples * n_rep_per_comp * n_components, n_dim)
+
+
     def _get_representations_two_opt(
             self,
             dataset: dataclasses.GeneExpressionDataset,
@@ -3273,6 +3344,274 @@ class BulkDGD(nn.Module):
         # Return the representations, the predicted means and r-values,
         # the time information for both rounds of optimization.
         return rep_2, pred_means_2, pred_r_values_2, time
+
+
+    def _final_losses(self,
+                      data_loader: torch.utils.data.DataLoader,
+                      rep: torch.Tensor,
+                      loss_reduction_type: str,
+                      latent_lambda: Optional[float],
+                      genes_mask: Optional[torch.Tensor],
+                      contamination: float,
+                      contamination_r: float) -> np.ndarray:
+
+        """The loss of ONE representation per sample, as it stands.
+
+        '_select_best_rep' already computes exactly this quantity on its
+        way to an 'argmin', and records it when asked to. With one
+        candidate per sample the 'argmin' is a formality and what comes
+        back is the per-sample loss, so the loss after the second
+        optimization is read out of the machinery that already exists
+        instead of a second implementation of the same arithmetic
+        drifting away from it.
+        """
+
+        n_samples = rep.shape[0]
+
+        keep_before = self._keep_selection_details
+
+        details_before = self._selection_details
+
+        self._keep_selection_details = True
+
+        self._selection_details = []
+
+        try:
+
+            self._select_best_rep(
+                data_loader = data_loader,
+                rep_layer = latents.RepresentationLayer(
+                    values = rep, device = self.device),
+                n_rep_per_comp = 1,
+                loss_reduction_type = loss_reduction_type,
+                latent_lambda = latent_lambda,
+                genes_mask = genes_mask,
+                contamination = contamination,
+                contamination_r = contamination_r,
+                n_components = 1)
+
+            out = np.full(n_samples, np.nan, dtype = np.float64)
+
+            for d in self._selection_details:
+
+                ixs = d["samples_ixs"].numpy()
+
+                out[ixs] = d["total_loss"].squeeze(-1).numpy()
+
+            return out
+
+        finally:
+
+            # The flag and the buffer are restored whatever happens, so
+            # that asking for the losses never leaves the model in a
+            # state the caller did not ask for.
+            self._keep_selection_details = keep_before
+
+            self._selection_details = details_before
+
+
+    def _get_representations_two_opt_multiseed(
+            self,
+            dataset: dataclasses.GeneExpressionDataset,
+            config: dict[str, object],
+            genes_mask: Optional[torch.Tensor] = None) -> \
+                tuple[torch.Tensor, torch.Tensor,
+                      Optional[torch.Tensor], list[tuple]]:
+
+        """Run the two-optimization scheme once per seed, and keep every
+        seed's answer.
+
+        WHAT IT IS FOR. The seed picks where the search starts and
+        nothing else: the candidates are drawn from the mixture's
+        components with it, and everything after - the descent, the
+        selection, the second descent - is deterministic given them. Two
+        seeds therefore end at two different local optima, and the genes
+        called from them differ by about a fifth. Which of the two is
+        right is not knowable from one run, but the genes both agree on
+        are measurably better than the genes only one finds, so the
+        agreement is worth having as a product and not as an accident.
+
+        WHY IT IS A SCHEME OF ITS OWN. It could have been a flag on
+        'two_opt', and should not be: it returns one representation per
+        sample PER SEED and a table of losses that 'two_opt' has no
+        counterpart for, so the two would have differed in their outputs
+        while sharing a name.
+
+        WHY THE SEEDS RUN IN SEQUENCE AND NOT IN ONE TALL TENSOR. Every
+        candidate's gradient is independent of every other - the loss is
+        summed, there is no gradient clipping in this path, and AdamW is
+        elementwise - so the seeds COULD share one optimization and be
+        mathematically identical to separate runs. They would not be
+        bitwise identical: the decoder's forward pass is a batched
+        matrix multiply, and changing how many rows go through it lets
+        the library pick a different kernel, which moves the last bits
+        and, over eight hundred epochs, can move a near-tie between two
+        candidates. Running each seed at the shape a standalone run uses
+        makes reproducing that run a property of the arithmetic rather
+        than a hope about kernel selection. The cost is the efficiency
+        of the larger multiply, which is not worth the doubt.
+
+        Returns the FIRST seed's representations, predicted means and
+        r-values, so that everything downstream that expects the output
+        of a scheme keeps working unchanged. Every seed's answer, and
+        the losses, are left on the model as 'multiseed_results'.
+        """
+
+        seeds = \
+            config["scheme_options"]["initialization"]["seeds"]
+
+        seeds = [int(s) for s in seeds]
+
+        if len(set(seeds)) != len(seeds):
+
+            raise ValueError(
+                f"The seeds must be distinct; got {seeds}. Two runs "
+                f"from the same seed produce the same representation "
+                f"and their agreement measures nothing.")
+
+        log.info(
+            f"Representations will be found from {len(seeds)} "
+            f"independent initializations (seeds "
+            f"{', '.join(map(str, seeds))}).")
+
+        #-------------------------------------------------------------#
+
+        reps, pred_means, pred_r_values = {}, {}, {}
+
+        losses = {}
+
+        time_all = []
+
+        # A data loader of this scheme's own, built exactly as 'two_opt'
+        # builds its one, for the final-loss pass. 'shuffle' is false in
+        # every configuration written, so the samples come back in the
+        # order their indices say either way.
+        data_loader = \
+            _util.get_data_loader(
+                dataset = dataset,
+                config = config["data_loader_options"])
+
+        latent_lambda = \
+            config["scheme_options"]["latent_loss_calculation"]["lambda"] \
+            if isinstance(self.latent,
+                          latents.GaussianMixtureModelTGMM) else None
+
+        contamination = \
+            float(config["scheme_options"].get("contamination", 0.0))
+
+        contamination_r = \
+            float(config["scheme_options"].get("contamination_r", 0.05))
+
+        loss_reduction_type = \
+            config["scheme_options"]["loss_reduction_type"]
+
+        n_samples = len(dataset.samples)
+
+        for seed in seeds:
+
+            # ONE SEED, AND THE CONFIGURATION 'two_opt' WOULD HAVE SEEN.
+            # The scheme is run through its own method rather than
+            # reimplemented here, so the two cannot drift: whatever
+            # 'two_opt' does to a representation, this does too.
+            cfg = copy.deepcopy(config)
+
+            cfg["scheme_options"]["initialization"] = \
+                {**cfg["scheme_options"].get("initialization", {}),
+                 "seed" : seed}
+
+            cfg["scheme_options"]["initialization"].pop("seeds", None)
+
+            log.info(f"Optimizing from seed {seed}...")
+
+            # THE SELECTION IS RECORDED WHILE IT HAPPENS, which is the
+            # only moment the losses of the candidates exist. Turning
+            # the existing switch on around the call gets them without
+            # 'two_opt' having to know it is being watched, and the
+            # previous setting is restored afterwards.
+            keep_before = self._keep_selection_details
+
+            details_before = self._selection_details
+
+            self._keep_selection_details = True
+
+            self._selection_details = []
+
+            try:
+
+                rep, pm, prv, t = \
+                    self._get_representations_two_opt(
+                        dataset = dataset,
+                        config = cfg,
+                        genes_mask = genes_mask)
+
+                # The winner's loss at the end of the first
+                # optimization: the competition's own number for the
+                # candidate the 'argmin' kept.
+                won = np.full(n_samples, np.nan, dtype = np.float64)
+
+                for d in self._selection_details:
+
+                    ixs = d["samples_ixs"].numpy()
+
+                    tl = d["total_loss"].numpy()
+
+                    won[ixs] = tl[np.arange(len(ixs)),
+                                  d["winner"].numpy()]
+
+            finally:
+
+                self._keep_selection_details = keep_before
+
+                self._selection_details = details_before
+
+            reps[seed], pred_means[seed] = rep, pm
+
+            pred_r_values[seed] = prv
+
+            time_all.extend(t)
+
+            losses[f"loss_opt1_seed{seed}"] = won
+
+            # And the same representation's loss once the second
+            # optimization has finished moving it.
+            losses[f"loss_opt2_seed{seed}"] = \
+                self._final_losses(
+                    data_loader = data_loader,
+                    rep = rep,
+                    loss_reduction_type = loss_reduction_type,
+                    latent_lambda = latent_lambda,
+                    genes_mask = genes_mask,
+                    contamination = contamination,
+                    contamination_r = contamination_r)
+
+        #-------------------------------------------------------------#
+
+        # One row per sample, two columns per seed, in the order the
+        # seeds were given so that the table reads as it was asked for.
+        cols = []
+
+        for seed in seeds:
+
+            cols += [f"loss_opt1_seed{seed}", f"loss_opt2_seed{seed}"]
+
+        df_losses = pd.DataFrame({c: losses[c] for c in cols},
+                                 index = dataset.samples)
+
+        df_losses.index.name = "sample"
+
+        self.multiseed_results = \
+            {"seeds" : seeds,
+             "representations" : reps,
+             "pred_means" : pred_means,
+             "pred_r_values" : pred_r_values,
+             "losses" : df_losses}
+
+        #-------------------------------------------------------------#
+
+        first = seeds[0]
+
+        return (reps[first], pred_means[first], pred_r_values[first],
+                time_all)
 
 
     def keep_selection_details(self,
@@ -6320,8 +6659,18 @@ class BulkDGD(nn.Module):
                              latents.GaussianMixtureModelLegacy)
                          else float("nan")})
 
-                pd.DataFrame(lrs_list).set_index("epoch").to_csv(
-                    output_lr_file)
+                # Parquet if asked for by extension, text otherwise -
+                # the same rule the rest of the training outputs follow.
+                _df_lrs = pd.DataFrame(lrs_list).set_index("epoch")
+
+                if str(output_lr_file).lower().endswith((".parquet",
+                                                         ".pq")):
+                    _df_lrs.to_parquet(output_lr_file,
+                                       engine = "pyarrow",
+                                       compression = "snappy",
+                                       index = True)
+                else:
+                    _df_lrs.to_csv(output_lr_file)
 
             #---------------------------------------------------------#
 
@@ -7031,6 +7380,14 @@ class BulkDGD(nn.Module):
             # Select the corresponding method.
             opt_method = self._get_representations_two_opt
 
+        # If the user selected the multi-seed two-optimizations scheme
+        #
+        # The same scheme run once per initialization seed, keeping
+        # every seed's answer instead of one. See the method.
+        elif opt_scheme == "two_opt_multiseed":
+
+            opt_method = self._get_representations_two_opt_multiseed
+
         # If it is a scheme this version does not implement
         else:
 
@@ -7039,7 +7396,8 @@ class BulkDGD(nn.Module):
             # nothing.
             raise ValueError(
                 f"Unsupported optimization scheme '{opt_scheme}'. "
-                f"The only scheme is 'two_opt'.")
+                f"The schemes are 'two_opt' and "
+                f"'two_opt_multiseed'.")
 
         #-------------------------------------------------------------#
             
@@ -8498,6 +8856,62 @@ class BulkDGD(nn.Module):
             config_train["representations_training_options"].get(
                 "init_rep_scale", 0.0)
 
+        # Get the distribution the initial representations are drawn
+        # from, and the options for it.
+        #
+        # The initialization used to be a scaled normal written out by
+        # hand here, which meant that the distributions the
+        # 'RepresentationLayer' already supports could not be reached
+        # from a training configuration at all. Naming one here selects
+        # it; naming none keeps the previous behaviour exactly, so
+        # configurations written before this change train as they did.
+        init_rep_dist = \
+            config_train["representations_training_options"].get(
+                "init_rep_dist", None)
+
+        init_rep_dist_options = \
+            dict(config_train["representations_training_options"].get(
+                "init_rep_dist_options", {}))
+
+        #-------------------------------------------------------------#
+
+        def _make_rep_layer(n_samples):
+
+            """Build a representation layer for `n_samples` samples.
+
+            In the model's own precision, so that it does not depend
+            on what torch's default dtype happens to be when 'train'
+            is called: a float64 model whose representations are
+            single precision fails when the two are multiplied. The
+            samplers in 'RepresentationLayer' call 'torch.randn'
+            without a dtype and so return the default one, which is
+            why the cast below is not optional.
+            """
+
+            dtype = self._DTYPES_TORCH[self._dtype]
+
+            # No distribution named - the behaviour this had before
+            # the option existed.
+            if init_rep_dist is None:
+
+                return latents.RepresentationLayer(\
+                    values = init_rep_scale * torch.randn(\
+                        size = (n_samples, self.latent.dim),
+                        dtype = dtype)).to(self.device)
+
+            # The shape is not the caller's to choose; it follows from
+            # the data and the model, so it is set here and any value
+            # supplied in the configuration is overridden rather than
+            # silently disagreeing with the number of samples.
+            options = dict(init_rep_dist_options)
+            options["n_samples"] = n_samples
+            options["dim"] = self.latent.dim
+
+            return latents.RepresentationLayer(\
+                dist = init_rep_dist,
+                dist_options = options,
+                device = self.device).to(dtype = dtype)
+
         #-------------------------------------------------------------#
 
         # Get the training samples.
@@ -8570,18 +8984,9 @@ class BulkDGD(nn.Module):
                 dataset = dataset_train,
                 config = config_train["data_loader_options"]["train"])
 
-        # Create the representation layer for the training samples.
-        #
-        # In the model's own precision, so that it does not depend on
-        # what torch's default dtype happens to be when 'train' is
-        # called: a float64 model whose representations are single
-        # precision fails when the two are multiplied.
-        rep_layer_train = \
-            latents.RepresentationLayer(values = \
-                init_rep_scale * torch.randn(\
-                    size = (n_samples_train, self.latent.dim),
-                    dtype = self._DTYPES_TORCH[self._dtype])).to(\
-                        self.device)
+        # Create the representation layer for the training samples,
+        # from whichever distribution the configuration named.
+        rep_layer_train = _make_rep_layer(n_samples_train)
 
         #-------------------------------------------------------------#
 
@@ -8612,14 +9017,9 @@ class BulkDGD(nn.Module):
                 dataset = dataset_test,
                 config = config_train["data_loader_options"]["test"])
 
-        # Create the representation layer for the testing samples, in
-        # the model's own precision, for the reason given just above.
-        rep_layer_test = \
-            latents.RepresentationLayer(values = \
-                init_rep_scale * torch.randn(\
-                    size = (n_samples_test, self.latent.dim),
-                    dtype = self._DTYPES_TORCH[self._dtype])).to(\
-                        self.device)
+        # Create the representation layer for the testing samples,
+        # from the same distribution as the training one.
+        rep_layer_test = _make_rep_layer(n_samples_test)
 
         #-------------------------------------------------------------#
 

@@ -339,6 +339,12 @@ The options that can be specified are described below.
 
       * ``"gain"`` is the gain factor for the noise. This is a non-negative float that defaults to ``1.0``.
 
+   * ``"init_rep_scale"`` is the scale by which the initial representations are multiplied when they are drawn from the default normal distribution. This is a non-negative float that defaults to ``0.0``, which starts every representation at the origin. It is ignored when ``"init_rep_dist"`` is given.
+
+   * ``"init_rep_dist"`` is the distribution the initial representations are drawn from, before any training happens. This is the name of any distribution :class:`core.latents.RepresentationLayer` supports, namely ``"normal"``, ``"uniform"``, ``"laplace"``, ``"student_t"``, ``"cauchy"``, ``"uniform_ball"`` or ``"zeros"``. If not specified, the representations are drawn from a normal distribution scaled by ``"init_rep_scale"``, which is what earlier versions did unconditionally.
+
+   * ``"init_rep_dist_options"`` is a dictionary of options for that distribution, and its contents depend on which one was named: ``"scale"`` for ``"normal"``, ``"uniform"``, ``"laplace"`` and ``"cauchy"``; ``"df"`` and ``"scale"`` for ``"student_t"``; ``"radius"`` for ``"uniform_ball"``; nothing for ``"zeros"``. The number of representations and their dimensionality follow from the data and the model, so ``"n_samples"`` and ``"dim"`` are set here automatically and any value given for them in the configuration is overridden.
+
    * ``"optimizer_type"`` is the type of optimizer to use for training the representations. This can be:
 
       * ``"adam"``, which uses the Adam optimizer.

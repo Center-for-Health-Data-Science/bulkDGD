@@ -3,9 +3,51 @@
 Configuration for the optimization scheme
 =========================================
 
-One optimization scheme to find the representations is implemented:
+Two optimization schemes to find the representations are implemented:
 
 * ``two_opt``, which consists of two consecutive rounds of optimizations. Indeed, multiple candidate representations per sample are found, optimized, and the best one for each sample is picked from the pool. Then, a second round of optimization is performed on these selected representations. The ``two_opt`` scheme is implemented in the YAML file ``bulkdgd/configs/representations/two_opt.yaml``.
+
+* ``two_opt_multiseed``, which runs ``two_opt`` once per initialization seed and keeps every seed's answer instead of one. It is implemented in the YAML file ``bulkdgd/configs/representations/two_opt_multiseed.yaml``.
+
+.. _rep_multiseed:
+
+Why a multi-seed scheme
+-----------------------
+
+The seed decides **where the search starts, and nothing else**. It places the candidate representations drawn from the components of the Gaussian mixture model; the two rounds of descent and the selection between them are deterministic once those candidates are fixed. Two seeds therefore arrive at two different local optima, and on tumour data the genes called from them differ by roughly a fifth of their union.
+
+Neither run can say which of the two is right. What can be said is that the calls the seeds **agree** on are measurably better than the calls only one of them makes: on TCGA, genes called from all three of three seeds overlap a cancer-matched driver catalogue 1.6 times as often as genes called from only one, and that separation survives controlling for effect size, widening to 2.2 times in the largest fold-change bin. The agreement is therefore worth producing deliberately rather than reconstructing from separate runs.
+
+**Each seed is run in sequence, at the tensor shape a standalone run uses.** The seeds could share one optimization and be *mathematically* identical to separate runs, since the loss is summed over candidates, there is no gradient clipping in this code path, and AdamW is elementwise, so no candidate's gradient depends on how many others share the tensor. They would not be *bitwise* identical: the decoder's forward pass is a batched matrix multiply, and changing how many rows pass through it lets the linear algebra library select a different kernel, which moves the last bits and, over hundreds of epochs, can flip a near-tie between two candidates. Running each seed separately makes reproducing a standalone run a property of the arithmetic instead of a hope about kernel selection, at the cost of the efficiency of the larger multiply.
+
+.. note::
+
+   ``two_opt_multiseed`` requires ``latent_type: tgmm``. The legacy Gaussian mixture model places its candidates by a deterministic rule that takes no seed, so every seed would return the same representation and the agreement between them would measure nothing.
+
+   It also requires ``loss_reduction_type: sum``. Under ``mean``, every gradient is divided by the number of candidates, and a seed's run here would no longer correspond to the same seed run on its own.
+
+   The seeds must be **distinct**. Two runs from one seed give the same representation, so the scheme raises rather than reporting an agreement that is an artefact of the configuration.
+
+Outputs
+-------
+
+``two_opt_multiseed`` produces one representation per sample **per seed**, together with the matching predicted means and r-values, and one further table that ``two_opt`` has no counterpart for: the loss of each sample's selected representation at the end of each optimization round.
+
+After the run, these are available on the model as ``multiseed_results``, a dictionary with the keys ``"seeds"``, ``"representations"``, ``"pred_means"``, ``"pred_r_values"`` and ``"losses"``. The first four map a seed to its result; ``"losses"`` is a :class:`pandas.DataFrame` with one row per sample, indexed by sample name, and two columns per seed:
+
+.. code-block:: text
+
+   sample                        loss_opt1_seed7  loss_opt2_seed7  loss_opt1_seed13  loss_opt2_seed13
+   GTEX-1117F-0226-SM-5GZZ7.1          100322.87         97806.77         105977.95         100584.39
+   GTEX-1117F-1326-SM-5EGHH.1           97275.88         92556.16          91213.52          90363.78
+
+``loss_opt1_seed<N>`` is the total loss of the candidate that won seed *N*'s selection, as of the last epoch of the first optimization: the competition's own number for the representation it kept. ``loss_opt2_seed<N>`` is that same representation's loss once the second optimization has finished moving it, and is therefore always the smaller of the two.
+
+The method returns the **first** seed's representations, predicted means and r-values, so that anything downstream expecting the output of a scheme keeps working unchanged.
+
+.. note::
+
+   Tables written to disk are written as Parquet. A float64 written as text does not read back as the number that was written, and these losses are compared between seeds and between runs.
 
 .. note::
 
@@ -21,7 +63,9 @@ The options that can be specified are described below.
 
 * ``"scheme_type"`` is the optimization scheme to use. This can be:
 
-   * ``"two_opt"`` for the optimization scheme with two rounds of optimization. This is currently the only scheme.
+   * ``"two_opt"`` for the optimization scheme with two rounds of optimization.
+
+   * ``"two_opt_multiseed"`` for the same scheme run once per initialization seed. See :ref:`rep_multiseed`. It takes every option ``two_opt`` takes, and reads its seeds from ``scheme_options.initialization.seeds``, a list of distinct integers.
 
 * ``"latent_type"`` is the type of latent space used in the model. This can be:
 
