@@ -55,7 +55,7 @@ from torch import nn
 import yaml
 
 # Import from 'bulkdgd'.
-from bulkdgd import _internals
+from bulkdgd import _internals, defaults
 from . import (
     dataclasses,
     decoders,
@@ -183,15 +183,16 @@ class BulkDGD(nn.Module):
 
 
     def __init__(self,
-                 latent_dim: int,
-                 latent_options: dict[str, object],
-                 decoder_options: dict[str, object],
-                 latent_type: str = "tgmm",
+                 latent_dim: Optional[int] = None,
+                 latent_options: Optional[dict[str, object]] = None,
+                 decoder_options: Optional[dict[str, object]] = None,
+                 latent_type: Optional[str] = None,
                  gmm_final: Optional[dict[str, object]] = None,
                  genes_txt_file: Optional[str] = None,
-                 scaling_factor: str = "mean",
-                 dtype: str = "float32",
-                 device: str = "cpu") -> None:
+                 scaling_factor: Optional[str] = None,
+                 dtype: Optional[str] = None,
+                 device: str = "cpu",
+                 seed: Optional[str] = None) -> None:
         """Initialize an instance of the class.
 
         The model is initialized on the CPU. To move the model to
@@ -298,6 +299,71 @@ class BulkDGD(nn.Module):
 
         #-------------------------------------------------------------#
 
+        # A BARE 'BulkDGD()' IS THE TRAINED MODEL.
+        #
+        # Describing the architecture by hand is what a user does to
+        # train a new model; asking for the published one should not
+        # require restating its shape correctly. When the architecture
+        # is not given, it is read from the shipped configuration of
+        # the requested member, together with the fitted parameters
+        # that go with it - the mixture from the package, the decoder
+        # fetched from the release on first use.
+        #
+        # Anything the caller did pass is kept, so a single argument
+        # can be overridden without restating the rest.
+        if (latent_dim is None and latent_options is None
+                and decoder_options is None):
+
+            shipped = _util.load_shipped_model(seed = seed)
+
+            latent_dim = shipped["latent_dim"]
+            latent_options = shipped["latent_options"]
+            decoder_options = shipped["decoder_options"]
+
+            if latent_type is None:
+                latent_type = shipped["latent_type"]
+
+            if genes_txt_file is None:
+                genes_txt_file = shipped["genes_txt_file"]
+
+            if scaling_factor is None:
+                scaling_factor = shipped["scaling_factor"]
+
+            if dtype is None:
+                dtype = shipped["dtype"]
+
+        elif seed is not None:
+
+            errstr = \
+                "'seed' selects which shipped model to load and so " \
+                "cannot be combined with an explicit architecture. " \
+                "Pass either 'seed', or 'latent_dim', " \
+                "'latent_options' and 'decoder_options'."
+            raise ValueError(errstr)
+
+        # An architecture given by hand, with nothing said about the
+        # rest, keeps the values this class has always defaulted to.
+        if latent_type is None:
+            latent_type = "tgmm"
+
+        if scaling_factor is None:
+            scaling_factor = "mean"
+
+        if dtype is None:
+            dtype = "float32"
+
+        if latent_dim is None or latent_options is None \
+                or decoder_options is None:
+
+            errstr = \
+                "'latent_dim', 'latent_options' and " \
+                "'decoder_options' describe the architecture and " \
+                "must be given together. Give none of them to load " \
+                "the trained model that ships with the package."
+            raise ValueError(errstr)
+
+        #-------------------------------------------------------------#
+
         # If the scaling factor is not one that is supported.
         if scaling_factor not in dataclasses.GeneExpressionDataset.\
                                     SCALING_FACTORS:
@@ -334,6 +400,16 @@ class BulkDGD(nn.Module):
         #-------------------------------------------------------------#
 
         # Get the genes included in the model.
+        #
+        # "default" IS RESOLVED HERE. The model configurations the
+        # package ships write it, and it is documented as meaning the
+        # gene list that comes with the package - but only the
+        # configuration loader used to understand it, so a caller
+        # passing it straight to the constructor got 'open("default")'
+        # and a file-not-found naming a file nobody wrote.
+        if genes_txt_file in (None, "default"):
+            genes_txt_file = defaults.DATA_FILES_MODEL["genes"]
+
         genes = \
             self.__class__._load_genes_list(\
                 genes_list_file = genes_txt_file)
@@ -420,6 +496,18 @@ class BulkDGD(nn.Module):
 
         # Save the options for the decoder in the model's attributes.
         self._decoder_initial_options = decoder_options
+
+        #-------------------------------------------------------------#
+
+        # Whether this model came from fitted parameters.
+        #
+        # Taken from the decoder rather than from the mixture: a new
+        # model can legitimately start from a fitted mixture, but a
+        # fitted decoder is what makes it a trained model. 'train'
+        # refuses on one of these unless the configuration says
+        # 'continue_training'.
+        self._is_trained = \
+            decoder_options.get("decoder_pth_file") is not None
 
         # Keep the genes the model knows, in the order the decoder
         # emits them. 'impute' needs them - it is given a sample missing
@@ -8832,6 +8920,39 @@ class BulkDGD(nn.Module):
         df_time : :class:`pandas.DataFrame`
             A data frame containing the training-time metrics.
         """
+
+        #-------------------------------------------------------------#
+
+        # TRAINING A TRAINED MODEL IS ALMOST ALWAYS A MISTAKE.
+        #
+        # A model built from fitted parameters - which is what a bare
+        # 'BulkDGD()' gives - starts from the published optimum, and
+        # calling 'train' on it moves it away from that silently: the
+        # object still answers to the same name, the results it then
+        # produces are no longer the published model's, and nothing in
+        # the output says so.
+        #
+        # Continuing to train one IS legitimate, for fine-tuning on a
+        # new cohort, so it is allowed when the configuration asks for
+        # it in as many words. Absent the keyword the answer is no,
+        # because the mistake is silent and the deliberate case is
+        # not.
+        continue_training = bool(config_train.get("continue_training",
+                                                  False)) \
+            if hasattr(config_train, "get") else False
+
+        if self._is_trained and not continue_training:
+
+            errstr = \
+                "This model was built from trained parameters, and " \
+                "training it would move it away from them. If you " \
+                "mean to continue training it - to fine-tune it on " \
+                "new data, for instance - set 'continue_training: " \
+                "true' at the top level of the training " \
+                "configuration. To train a new model instead, build " \
+                "one from an architecture rather than from a " \
+                "checkpoint."
+            raise RuntimeError(errstr)
 
         #-------------------------------------------------------------#
 

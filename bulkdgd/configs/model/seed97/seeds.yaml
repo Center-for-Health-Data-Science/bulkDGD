@@ -1,0 +1,12 @@
+seeds:
+  seed: 97
+  python_random: 97
+  numpy: 97
+  torch: 97
+  torch_cuda: 97
+  deterministic_algorithms: false
+dtype: float64
+bulkdgd_version: 2.0.1
+torch_version: 2.7.1+rocm6.2.4
+latent_random_state: null
+device: cuda:0

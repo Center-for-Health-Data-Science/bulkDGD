@@ -36,6 +36,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import torch
+import yaml
 from torch.utils.data import DataLoader
 
 # Import from 'bulkdgd'.
@@ -2069,3 +2070,61 @@ def save_pathways_saliency_maps_epoch(
     # Save the saliency map.
     _save_epoch_df(df_saliency_map, saliency_map_out,
                            sep = ",")
+
+
+#######################################################################
+
+
+def load_shipped_model(seed = None):
+
+    """The architecture and fitted parameters of one member of the
+    ensemble that ships with the package.
+
+    Returns the keyword arguments 'BulkDGD' needs to be the trained
+    model, with the paths to the fitted parameters already filled in.
+
+    THE PATHS ARE RESOLVED HERE, NOT LEFT AS "default". The "default"
+    sentinel resolves through 'DATA_FILES_MODEL', which names the base
+    member; a non-base seed asking for it would silently be handed the
+    base model's mixture and decoder, and since every member has the
+    same shape nothing downstream would complain. Naming the files
+    explicitly makes the seed asked for the seed loaded.
+    """
+
+    seed = seed if seed is not None else defaults.BASE_SEED
+
+    if seed not in defaults.ENSEMBLE_SEEDS:
+        errstr = \
+            f"'{seed}' is not a member of the shipped ensemble. The " \
+            f"members are: {', '.join(defaults.ENSEMBLE_SEEDS)}."
+        raise ValueError(errstr)
+
+    files = defaults.data_files_model(seed)
+
+    with open(files["config"], "r") as f:
+        config = yaml.safe_load(f)
+
+    # The mixture ships with the package; the decoder does not, and is
+    # fetched on first use into the same per-seed directory.
+    config["latent_options"]["latent_pth_file"] = files["gmm"]
+
+    if not os.path.isfile(files["dec"]):
+        _internals.util.download_decoder_pth(dest_path = files["dec"],
+                                             seed = seed)
+
+    config["decoder_options"]["decoder_pth_file"] = files["dec"]
+
+    # THE SENTINEL IS RESOLVED HERE TOO. "default" is understood by
+    # the configuration loader, not by 'BulkDGD.__init__', which hands
+    # what it is given straight to 'open' - so leaving it would make
+    # the constructor look for a file literally named "default".
+    genes = config.get("genes_txt_file", "default")
+
+    config["genes_txt_file"] = \
+        files["genes"] if genes in (None, "default") else genes
+
+    config.setdefault("latent_type", "tgmm")
+    config.setdefault("scaling_factor", "mean")
+    config.setdefault("dtype", "float32")
+
+    return config

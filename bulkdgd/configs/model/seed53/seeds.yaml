@@ -1,0 +1,12 @@
+seeds:
+  seed: 53
+  python_random: 53
+  numpy: 53
+  torch: 53
+  torch_cuda: 53
+  deterministic_algorithms: false
+dtype: float64
+bulkdgd_version: 2.0.1
+torch_version: 2.7.1+rocm6.2.4
+latent_random_state: null
+device: cuda:0

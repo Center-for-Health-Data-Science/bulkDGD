@@ -56,21 +56,23 @@ import multiprocessing as mp
 import os
 import time
 import traceback
+from typing import Optional
 import zipfile
 
 # Import from third-party libraries.
 import pandas as pd
 
 # Import from the package.
-from ..ioutil.tableio import save_table
 import torch
 import yaml
 
 # Import from 'bulkdgd'.
 import bulkdgd
+from bulkdgd import defaults
 from bulkdgd.analysis import dea as analysis_dea
 from bulkdgd.core.model import BulkDGD
 from bulkdgd.ioutil import deaio
+from bulkdgd.ioutil.tableio import save_table
 from bulkdgd.reproducibility import set_seeds
 
 
@@ -229,8 +231,9 @@ class BulkDGDEnsemble:
 
 
     def __init__(self,
-                 config_model: dict[str, object],
-                 config_ensemble: dict[str, dict[str, object]],
+                 config_model: Optional[dict[str, object]] = None,
+                 config_ensemble: \
+                     Optional[dict[str, dict[str, object]]] = None,
                  device: str = "cpu") -> None:
         """Initialize an instance of the class.
 
@@ -268,6 +271,31 @@ class BulkDGDEnsemble:
         device : :class:`str`, ``"cpu"``
             The device the members are placed on when they are built.
         """
+
+        # A BARE 'BulkDGDEnsemble()' IS THE SHIPPED ENSEMBLE.
+        #
+        # Its members differ only in their seed, so describing them by
+        # hand means writing the same architecture fifteen times and
+        # fifteen paths that have to agree with it. Given neither
+        # configuration, both are built from what the package ships.
+        #
+        # Members are still built one at a time, by 'get_model', so
+        # nothing is loaded until it is asked for: the decoders are
+        # 1.79 GiB each and fetched on first use.
+        if config_model is None and config_ensemble is None:
+
+            config_model, config_ensemble = self.shipped_config()
+
+        elif config_model is None or config_ensemble is None:
+
+            errstr = \
+                "'config_model' and 'config_ensemble' describe the " \
+                "ensemble together and must be given together. Give " \
+                "neither to use the ensemble that ships with the " \
+                "package."
+            raise ValueError(errstr)
+
+        #-------------------------------------------------------------#
 
         # Save the model's configuration. It is copied because it is
         # the ensemble's defining property - a caller that edits the
@@ -312,6 +340,48 @@ class BulkDGDEnsemble:
                 "the ensemble is built with. The members will be less "
                 "different from each other than their seeds suggest. "
                 "Leave it unset unless you mean it.")
+
+
+
+    @staticmethod
+    def shipped_config() -> tuple:
+
+        """The configuration of the ensemble that ships with the
+        package: the shared model configuration, and one entry per
+        member.
+
+        The members differ in nothing but the seed, so the model
+        configuration is read once, from the base member, and every
+        entry points at its own directory of fitted parameters.
+        """
+
+        from bulkdgd.core import _util
+
+        # Read the shared architecture from the base member. The
+        # per-member paths are filled in by 'get_model', so the
+        # parameter files this returns are deliberately left out.
+        config_model = _util.load_shipped_model(
+            seed = defaults.BASE_SEED)
+
+        for key in ("latent_options", "decoder_options"):
+            config_model[key] = dict(config_model[key])
+
+        config_model["latent_options"].pop("latent_pth_file", None)
+        config_model["decoder_options"].pop("decoder_pth_file", None)
+
+        # Results land under the working directory: there is nowhere
+        # inside an installed package that a user's output belongs,
+        # and writing there would fail on a system-wide install.
+        results_root = os.path.join(os.getcwd(),
+                                    "bulkdgd_ensemble_results")
+
+        config_ensemble = {
+            seed : {"seed" : int(seed.removeprefix("seed")),
+                    "model_dir" : defaults.model_dir(seed),
+                    "results_dir" : os.path.join(results_root, seed)}
+            for seed in defaults.ENSEMBLE_SEEDS}
+
+        return config_model, config_ensemble
 
 
     def _check_config_ensemble(
@@ -729,8 +799,24 @@ class BulkDGDEnsemble:
         config_model["latent_options"]["latent_pth_file"] = \
             os.path.join(options["model_dir"], self.GMM_PTH_FILE)
 
-        config_model["decoder_options"]["decoder_pth_file"] = \
+        decoder_pth_file = \
             os.path.join(options["model_dir"], self.DEC_PTH_FILE)
+
+        # THE DECODER IS FETCHED HERE, NOT SHIPPED. Each is 1.79 GiB,
+        # so they live on the release rather than in the package, and
+        # a member's is downloaded the first time that member is
+        # built. Only members the package ships can be fetched; for
+        # any other directory the missing file is the caller's to
+        # provide, and 'BulkDGD' will say so.
+        if not os.path.isfile(decoder_pth_file) \
+                and os.path.basename(options["model_dir"]) \
+                    in defaults.ENSEMBLE_SEEDS:
+
+            bulkdgd._internals.util.download_decoder_pth(
+                dest_path = decoder_pth_file)
+
+        config_model["decoder_options"]["decoder_pth_file"] = \
+            decoder_pth_file
 
         #-------------------------------------------------------------#
 

@@ -540,8 +540,9 @@ def kwargs_to_dict(kwargs: dict[str, object]) -> dict[str, object]:
     return d
 
 
-def download_decoder_pth(dest_path: str) -> None:
-    """Download the trained decoder's parameters (``dec.pth``) from
+def download_decoder_pth(dest_path: str,
+                         seed: Optional[str] = None) -> None:
+    """Download one trained decoder's parameters (``dec.pth``) from
     the GitHub release matching the installed ``bulkdgd`` version, and
     save them at ``dest_path``.
 
@@ -553,6 +554,13 @@ def download_decoder_pth(dest_path: str) -> None:
     ----------
     dest_path : :class:`str`
         The path where the downloaded file should be saved.
+
+    seed : :class:`str`, optional
+        Which member of the ensemble to fetch, as ``"seed37"``. If not
+        given, it is taken from the name of the directory
+        ``dest_path`` sits in, which is where every member's
+        parameters live; that keeps the file downloaded and the file
+        looked for from ever disagreeing.
     """
 
     # Import here to avoid a circular import at module load time
@@ -563,16 +571,35 @@ def download_decoder_pth(dest_path: str) -> None:
     import bulkdgd
     from bulkdgd import defaults
 
+    # THE SEED COMES FROM THE DESTINATION unless the caller names one.
+    #
+    # Every member's parameters live in a directory named for its
+    # seed, so the destination already says which member is wanted.
+    # Deriving it here means a caller cannot ask for one member's file
+    # and be handed another's, which would be silent: the decoders
+    # have identical shapes and differ only in their values.
+    if seed is None:
+        seed = os.path.basename(os.path.dirname(dest_path))
+
+    if seed not in defaults.ENSEMBLE_SEEDS:
+        errstr = \
+            f"'{seed}' is not a member of the shipped ensemble. The " \
+            f"members are: {', '.join(defaults.ENSEMBLE_SEEDS)}."
+        raise ValueError(errstr)
+
     # Get the URL from which the decoder's parameters can be
     # downloaded.
-    url = defaults.DECODER_PTH_URL.format(version = bulkdgd.__version__)
+    url = \
+        defaults.DECODER_PTH_URL.format(\
+            version = bulkdgd.__version__,
+            seed = seed)
 
     # Inform the user that the download is about to start.
     infostr = \
-        "The trained decoder's parameters were not found locally " \
-        f"and will now be downloaded from '{url}'. This is a " \
-        "one-off download (file size: about 900 MB) - subsequent " \
-        "runs will reuse the downloaded file."
+        f"The trained decoder's parameters for '{seed}' were not " \
+        f"found locally and will now be downloaded from '{url}'. " \
+        "This is a one-off download (file size: about 1.8 GiB) - " \
+        "subsequent runs will reuse the downloaded file."
     logger.info(infostr)
 
     #-----------------------------------------------------------------#

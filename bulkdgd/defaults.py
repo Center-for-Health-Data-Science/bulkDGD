@@ -249,44 +249,100 @@ CONFIG_FILES_PLOT = {
 #######################################################################
 
 
-# Set the default files used for setting up the model.
-DATA_FILES_MODEL = {
-    
-    # Set the default PyTorch file containing the parameters of the
-    # trained Gaussian mixture model.
-    "gmm" : \
-        os.path.join(os.path.dirname(__file__),
-                        "data/model/gmm/gmm.pth"),
-    
-    #-----------------------------------------------------------------#
+# The seeds the shipped ensemble was trained with, in the order the
+# ensemble reports them.
+#
+# The members differ in nothing but the seed: the architecture, the
+# gene universe and the train/test split are identical across all
+# fifteen, so a per-seed directory holds only what the seed changed -
+# the fitted parameters, and the record of the seed itself.
+ENSEMBLE_SEEDS = ("seed37", "seed41", "seed43", "seed47", "seed53",
+                  "seed59", "seed61", "seed67", "seed71", "seed73",
+                  "seed79", "seed83", "seed89", "seed97", "seed101")
 
-    # Set the default PyTorch file containing the parameters of the
-    # trained decoder.
-    "dec" : \
-        os.path.join(os.path.dirname(__file__),
-                        "data/model/dec/dec.pth"),
-    
-    #-----------------------------------------------------------------#
 
-    # Set the default file containing the Ensembl IDs of the genes
-    # included in the DGD model.
-    "genes" : \
-        os.path.join(os.path.dirname(__file__),
-                     "data/model/genes/genes.txt"),
+#-----------------------------------------------------------------#
 
-    #-----------------------------------------------------------------#
 
-    }
+# The member a bare 'BulkDGD()' loads.
+#
+# Nothing distinguishes it from the other fourteen except that the
+# paper reports it, so results quoted for "the model" can be
+# reproduced without knowing which seed produced them.
+BASE_SEED = "seed37"
 
 
 #######################################################################
 
 
-# Set the URL template from which the trained decoder's parameters
-# (too large to be distributed with the package itself) can be
-# downloaded on demand. '{version}' is filled in with the installed
-# 'bulkdgd' version, so a given release always downloads the exact
-# decoder it was tested with.
+def model_dir(seed: str = BASE_SEED) -> str:
+    """The directory holding one member's fitted parameters."""
+
+    return os.path.join(os.path.dirname(__file__), "data", "model", seed)
+
+
+def model_config_dir(seed: str = BASE_SEED) -> str:
+    """The directory holding one member's configuration."""
+
+    return os.path.join(os.path.dirname(__file__), "configs", "model",
+                        seed)
+
+
+def data_files_model(seed: str = BASE_SEED) -> dict:
+    """The files needed to set one member of the ensemble up.
+
+    'dec.pth' is named here whether or not it exists: it is fetched
+    from the release on first use (see 'DECODER_PTH_URL'), and this is
+    where it lands.
+    """
+
+    return {
+
+        # The trained Gaussian mixture's parameters. Small enough to
+        # ship with the package.
+        "gmm" : os.path.join(model_dir(seed), "gmm.pth"),
+
+        # The trained decoder's parameters. Not shipped; downloaded.
+        "dec" : os.path.join(model_dir(seed), "dec.pth"),
+
+        # The gene universe, which every member shares.
+        "genes" : os.path.join(os.path.dirname(__file__),
+                               "data/model/genes/genes.txt"),
+
+        # The model's own architecture, and the seeds it was trained
+        # with.
+        "config" : os.path.join(model_config_dir(seed), "model.yaml"),
+
+        "seeds" : os.path.join(model_config_dir(seed), "seeds.yaml"),
+        }
+
+
+#######################################################################
+
+
+# Set the default files used for setting up the model.
+#
+# Kept as a mapping for the callers that read it directly; it resolves
+# to the base member, which is what those callers meant when there was
+# only one model to mean.
+DATA_FILES_MODEL = data_files_model(BASE_SEED)
+
+
+#######################################################################
+
+
+# Set the URL template from which a trained decoder's parameters (too
+# large to be distributed with the package itself) can be downloaded on
+# demand. '{version}' is filled in with the installed 'bulkdgd'
+# version, so a given release always downloads the exact decoders it
+# was tested with, and '{seed}' selects the member.
+#
+# ONE ASSET PER MEMBER, AND PER RELEASE. Each decoder is 1.79 GiB in
+# float64, close enough to the 2 GiB limit on a single release asset
+# that a wider decoder or a later dtype change would breach it. Tying
+# the name to both the version and the seed means a future release can
+# change the shape of what it ships without any older install trying
+# to read it.
 DECODER_PTH_URL = \
     "https://github.com/Center-for-Health-Data-Science/bulkdgd/" \
-    "releases/download/v{version}/dec.pth"
+    "releases/download/v{version}/dec_{seed}.pth"
