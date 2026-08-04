@@ -29,7 +29,7 @@ The sections below walk through this in more detail, for two common ways of mana
 
 .. important::
 
-   The trained decoder's parameters (``dec.pth``) are too large to be distributed with the package on PyPI. Instead, ``bulkdgd`` downloads this file automatically the first time you use the pre-trained model (for instance, when running :doc:`bulkdgd_find_representations <command_line_interface>` for the first time) - no manual step is needed. This is a one-off download of about 900 MB; subsequent runs reuse the downloaded file. If the machine you are running ``bulkdgd`` on has no internet access, see the note on manual download in the installation methods below.
+   The trained decoders' parameters are too large to be distributed with the package on PyPI: there is one decoder per member of the shipped ensemble, each 1.79 GiB in ``float64``. Instead, ``bulkdgd`` downloads the one it needs automatically the first time you use that member (for instance, when running :doc:`bulkdgd_find_representations <command_line_interface>` for the first time) - no manual step is needed. This is a one-off download per member; subsequent runs reuse the downloaded file. If the machine you are running ``bulkdgd`` on has no internet access, see the note on manual download in the installation methods below.
 
 Here, we provide instructions for installing bulkdgd in:
 

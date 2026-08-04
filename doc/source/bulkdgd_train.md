@@ -14,9 +14,23 @@ It is recommended to pre-process the samples with [`bulkdgd_preprocess_samples`]
 
 `bulkdgd_train` also needs two configuration files:
 
-* A YAML configuration file specifying the bulkdgd model's options. An example of this configuration file can be found in `bulkdgd/configs/model`.
+* A YAML configuration file specifying the bulkdgd model's options. Examples of this configuration file can be found in `bulkdgd/configs/model`: `model_tgmm.yaml` for the current Gaussian mixture model implementation, `model_lgmm.yaml` for the legacy one. Both describe an architecture and name no parameter files, which is what training a new model needs.
 
 * A YAML configuration file defining the options used for the training process. An example of this configuration file can be found in `bulkdgd/configs/training`.
+
+## Training a model that is already trained
+
+A model built from fitted parameters - which is what a configuration file naming a `latent_pth_file` and a `decoder_pth_file` gives, and what `BulkDGD()` gives in Python - starts from the published optimum, and training it moves it away from that silently: the object still answers to the same name, and nothing in the output says that its results are no longer the published model's.
+
+Training therefore **refuses** on such a model unless the training configuration asks for it in as many words, by setting
+
+```yaml
+continue_training: true
+```
+
+at its top level. Continuing to train a trained model is legitimate for fine-tuning it on a new cohort, which is why the option exists; absent it the answer is no, because the mistake is silent and the deliberate case is not.
+
+To train a new model instead, build it from an architecture: use one of the configuration files above, which name no parameters.
 
 The executable produces six to eight output files. These files are always produced:
 
@@ -62,7 +76,7 @@ The command can be run in parallel over different inputs in different directorie
 ## Command line
 
 ```
-bulkdgd_train [-h] -is INPUT_SAMPLES -it INPUT_TRAIN -ie INPUT_TEST [-ilt INPUT_LABELS_TRAIN] [-ile INPUT_LABELS_TEST] -icm INPUT_CONFIG_FILE_MODEL -ict INPUT_CONFIG_FILE_TRAIN [-olat OUTPUT_LATENT] [-odec OUTPUT_DECODER] [-ort OUTPUT_REP_TRAIN] [-ore OUTPUT_REP_TEST] [-opmt OUTPUT_PRED_MEANS_TRAIN] [-opme OUTPUT_PRED_MEANS_TEST] [-opv OUTPUT_PRED_RVALUES] [-opvt OUTPUT_PRED_RVALUES_TRAIN] [-opve OUTPUT_PRED_RVALUES_TEST] [-ol OUTPUT_LOSS] [-omrt OUTPUT_METRICS_TRAIN] [-omre OUTPUT_METRICS_TEST] [-ot OUTPUT_TIME] [-dev DEVICE] [-d WORK_DIR] [-lf LOG_FILE] [-lc] [-v] [-vv] [-p] [-n N_PROC] [-ds DIRS [DIRS ...]]
+bulkdgd_train [-h] -is INPUT_SAMPLES -it INPUT_TRAIN -ie INPUT_TEST [-ilt INPUT_LABELS_TRAIN] [-ile INPUT_LABELS_TEST] -icm INPUT_CONFIG_FILE_MODEL -ict INPUT_CONFIG_FILE_TRAIN [-olat OUTPUT_LATENT] [-odec OUTPUT_DECODER] [-ogmmf OUTPUT_GMM_FINAL] [-ort OUTPUT_REP_TRAIN] [-ore OUTPUT_REP_TEST] [-opmt OUTPUT_PRED_MEANS_TRAIN] [-opme OUTPUT_PRED_MEANS_TEST] [-opv OUTPUT_PRED_RVALUES] [-opvt OUTPUT_PRED_RVALUES_TRAIN] [-opve OUTPUT_PRED_RVALUES_TEST] [-ol OUTPUT_LOSS] [-omt OUTPUT_METRICS_TRAIN] [-ome OUTPUT_METRICS_TEST] [-ot OUTPUT_TIME] [-dev DEVICE] [-d WORK_DIR] [-lf LOG_FILE] [-lc] [-v] [-vv] [-p] [-n N_PROC] [-ds DIRS [DIRS ...]]
 ```
 
 ## Options
@@ -91,17 +105,20 @@ bulkdgd_train [-h] -is INPUT_SAMPLES -it INPUT_TRAIN -ie INPUT_TEST [-ilt INPUT_
 | ---------------------------- | ------------------------------------------------------------ |
 | `-olat`, `--output-latent` | The output .pth file where the latent space's parameters will be saved after training. By default, the file will be named `latent.pth`. |
 | `-odec`, `--output-decoder` | The output .pth file where the decoder's parameters will be saved after training. By default, the file will be named `decoder.pth`. |
+| `-ogmmf`, `--output-gmm-final` | The output .pth file where the parameters of the Gaussian mixture model fitted to the representations after training will be saved. It is written only if the model's configuration has a `gmm_final` section. It is a separate file from the one given by `-olat`, `--output-latent`, which keeps the prior the model was trained with. By default, the file will be named `gmm_final.pth`. |
 | `-ort`, `--output-rep-train` | The output CSV file containing the data frame with the representation of each training sample in latent space. The default file name is `representations_train.csv`. |
 | `-ore`, `--output-rep-test`  | The output CSV file containing the data frame with the representation of each test sample in latent space. The default file name is `representations_test.csv`. |
-| `-omt`, `--output-pred-means-train` | The output CSV file containing the data frame with the predicted mean of each gene in each training sample. The default file name is `pred_means_train.csv`. |
-| `-ome`, `--output-pred-means-test` | The output CSV file containing the data frame with the predicted mean of each gene in each test sample. The default file name is `pred_means_test.csv`. |
+| `-opmt`, `--output-pred-means-train` | The output CSV file containing the data frame with the predicted mean of each gene in each training sample. The default file name is `pred_means_train.csv`. |
+| `-opme`, `--output-pred-means-test` | The output CSV file containing the data frame with the predicted mean of each gene in each test sample. The default file name is `pred_means_test.csv`. |
 | `-opv`, `--output-pred-rvalues` | The output CSV file containing the data frame with the r-value for each gene. The default file name is `pred_r_values.csv`. If the model's output module returns r-values per gene and per sample, the `-opvt`, `--output-pred-rvalues-train` and `-opve`, `--output-pred-rvalues-test` options should be used instead. |
 | `-opvt`, `--output-pred-rvalues-train` | The output CSV file containing the data frame with the r-value for each gene in each training sample. The default file name is `pred_r_values_train.csv`. This option will be used only if the model's output module returns r-values per gene and per sample. |
 | `-opve`, `--output-pred-rvalues-test` | The output CSV file containing the data frame with the r-value for each gene in each test sample. The default file name is `pred_r_values_test.csv`. This option will be used only if the model's output module returns r-values per gene and per sample. |
 | `-ol`, `--output-loss` | The output CSV file containing the data frame with the per-epoch losses for training and test samples. The default file name is `loss.csv`. |
-| `-omrt`, `--output-metrics-train` | The output CSV file containing the data frame with the per-epoch values of the latent space clustering metrics computed during training for the training samples. The default file name is `metrics_train.csv`. This file will be written only if at least one clustering metric is computed during training (they are specified in the `-ict`, `--input-config-file-train` configuration file).|
-| `-omre`, `--output-metrics-test` | The output CSV file containing the data frame with the per-epoch values of the latent space clustering metrics computed during training for the test samples. The default file name is `metrics_test.csv`. This file will be written only if at least one clustering metric is computed during training (they are specified in the `-ict`, `--input-config-file-train` configuration file).|
+| `-omt`, `--output-metrics-train` | The output CSV file containing the data frame with the per-epoch values of the latent space clustering metrics computed during training for the training samples. The default file name is `metrics_train.csv`. This file will be written only if at least one clustering metric is computed during training (they are specified in the `-ict`, `--input-config-file-train` configuration file).|
+| `-ome`, `--output-metrics-test` | The output CSV file containing the data frame with the per-epoch values of the latent space clustering metrics computed during training for the test samples. The default file name is `metrics_test.csv`. This file will be written only if at least one clustering metric is computed during training (they are specified in the `-ict`, `--input-config-file-train` configuration file).|
 | `-ot`, `--output-time` | The output CSV file containing the data frame with information about the CPU and wall clock time spent for each training epoch. The default file name is `train_time.csv`. |
+
+Every one of these tables is written through `bulkdgd.ioutil.save_table`, which picks the format from the file's suffix: the default names end in `.csv` and are written as text, and a name ending in `.parquet` is written as Parquet instead. Parquet is the format that returns a `float64` unchanged, so it is the one to ask for when the numbers are going to be compared between runs.
 
 ### Run options
 

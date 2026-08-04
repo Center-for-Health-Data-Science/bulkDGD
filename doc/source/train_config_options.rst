@@ -11,6 +11,12 @@ The function that loads the configuration file is :func:`bulkdgd.ioutil.load_con
 
 The options that can be specified are described below.
 
+* ``"continue_training"`` is whether the model being trained is allowed to be one that was built from trained parameters. This is a boolean and defaults to ``False``.
+
+  :meth:`bulkdgd.core.model.BulkDGD.train` **refuses** to run on a model whose decoder came from a checkpoint - which is what a model configuration naming a ``"decoder_pth_file"`` gives, and what a bare ``BulkDGD()`` gives - unless this is set to ``true`` at the **top level** of the training configuration. Such a model starts from the published optimum, and training it moves it away from that without anything in the output saying so: the object answers to the same name afterwards, and the results it then produces are no longer the published model's.
+
+  Continuing to train one is legitimate, for fine-tuning it on a new cohort, which is why the option exists. Absent it the answer is no, because the mistake is silent and the deliberate case is not. To train a new model instead, build it from an architecture that names no parameter files, such as ``bulkdgd/configs/model/model_tgmm.yaml``.
+
 * ``"n_epochs"`` is the number of epochs to train the model for. This is a positive integer and defaults to ``200``.
 
 * ``"loss_reduction_type"`` is the reduction method to use for the loss function. This can be:

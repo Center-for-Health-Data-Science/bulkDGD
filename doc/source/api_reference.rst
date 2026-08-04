@@ -22,6 +22,8 @@ bulkdgd consists of several packages:
 
 * :doc:`core <core>`, containing the core components of the bulkdgd model and the model itself.
 
+* ``ensemble``, containing ``bulkdgd.ensemble.ensemble.BulkDGDEnsemble``, the ensemble of models differing only in the seed they were trained with, and the tiered consensus drawn from it. The fifteen members that ship with the package are what a bare ``BulkDGDEnsemble()`` loads; see :ref:`model_shipped`.
+
 * :doc:`genes <genes>`, containing utilities to create customized lists of genes to use with the bulkdgd model.
 
 * :doc:`ioutil <ioutil>`, containing utilities for loading and saving files and pre-process data.

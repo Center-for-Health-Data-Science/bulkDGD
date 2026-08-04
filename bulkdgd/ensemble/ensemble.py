@@ -140,9 +140,30 @@ def _get_genes_called(item: tuple) -> tuple:
             # Return nothing.
             return None
 
-        # Name the columns. They were selected by position, so they
-        # come in the order they have in the file.
-        df_stats.columns = ["q_value", "log2_fold_change"]
+        # SELECT THE COLUMNS BY NAME.
+        #
+        # They used to be selected by position, through 'usecols', and
+        # then renamed positionally here. That silently stopped
+        # working when the results moved to Parquet: 'usecols' is a
+        # 'read_csv' keyword and a Parquet read ignores it, so the
+        # frame arrives with every column it has and this line tried
+        # to put two names on six of them. Every consensus over
+        # Parquet results - which is everything the package writes now
+        # - died with "Length mismatch". Asking for the two columns by
+        # name works whatever the file is.
+        missing = [c for c in ("q_value", "log2_fold_change")
+                   if c not in df_stats.columns]
+
+        if missing:
+
+            errstr = \
+                f"The statistics for sample '{sample}' have no " \
+                f"{', '.join(repr(c) for c in missing)} column. The " \
+                f"columns found were: " \
+                f"{', '.join(repr(c) for c in df_stats.columns)}."
+            raise KeyError(errstr)
+
+        df_stats = df_stats[["q_value", "log2_fold_change"]]
 
         # Get the genes the model calls for the sample.
         genes = \
@@ -1935,7 +1956,7 @@ class BulkDGDEnsemble:
         # Get the files to be packed.
         names = sorted(name for name in os.listdir(dea_dir)
                        if name.startswith(prefix)
-                       and name.endswith(".csv"))
+                       and name.endswith(deaio.READ_EXTENSIONS))
 
         # If there is nothing to pack
         if not names:

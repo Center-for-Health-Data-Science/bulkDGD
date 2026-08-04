@@ -10,6 +10,7 @@ Tutorials
    tutorial_notebooks/tutorial_3
    tutorial_notebooks/tutorial_4
    tutorial_notebooks/tutorial_5
+   tutorial_notebooks/tutorial_6
 
 In this section, you will find examples of how to use the bulkdgd package for different tasks.
 

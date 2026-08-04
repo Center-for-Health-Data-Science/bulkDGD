@@ -237,9 +237,11 @@ def load_config_train(config_file: Optional[str]) -> dict[str, object]:
     ----------
     config_file : :class:`str`, optional
         The YAML configuration file. If no file is provided, the
-        default configuration file "training_tgmm.yaml" in the
-        directory storing configuration files for the training will
-        be used.
+        default configuration file "training.yaml" in the directory
+        storing configuration files for the training will be used.
+        That is the configuration the published ensemble was trained
+        with, so a model trained with no configuration given is
+        trained the way the shipped models were.
 
     Returns
     -------
@@ -253,7 +255,7 @@ def load_config_train(config_file: Optional[str]) -> dict[str, object]:
         # Use the default configuration file.
         config_file = \
             os.path.join(defaults.CONFIG_DIRS["training"],
-                        "training_tgmm.yaml")
+                        "training.yaml")
 
     # Load the configuration from the file.
     return _load_config(config_file = config_file,

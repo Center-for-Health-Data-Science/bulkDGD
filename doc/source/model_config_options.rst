@@ -9,6 +9,67 @@ These options can be passed as a nested dictionary or are specified in a YAML co
 
 The function that loads the configuration file is :func:`bulkdgd.ioutil.load_config_model`.
 
+.. _model_shipped:
+
+The trained model that ships with the package
+---------------------------------------------
+
+None of these options has to be set to obtain the published model. Describing an architecture by hand is what is done to train a new model; asking for the trained one does not require restating its shape correctly:
+
+.. code-block:: python
+
+   from bulkdgd.core.model import BulkDGD
+
+   # The trained model, as published.
+   model = BulkDGD()
+
+   # Another member of the ensemble it belongs to.
+   model = BulkDGD(seed = "seed41")
+
+A :class:`bulkdgd.core.model.BulkDGD` built with no architecture reads the architecture, the gene list, the scaling factor and the precision from the configuration shipped for the requested member, and loads that member's fitted parameters. For every member this is 32 latent dimensions, a ``"tgmm"`` mixture of **48** components with a ``"tied_spherical"`` covariance, a ``"nb_full_dispersion"`` decoder with hidden layers of 500 and 8000 units, the curated list of **14,740** genes, the ``"median"`` scaling factor and ``"float64"``.
+
+``"seed"`` selects which member is loaded, and defaults to ``"seed37"``, the member the paper reports. It cannot be combined with ``"latent_dim"``, ``"latent_options"`` and ``"decoder_options"``: those three describe an architecture to be built from scratch, so giving them together with a seed asks for two different models at once, and raises. They are also the three that must be given together, or not at all.
+
+Anything else passed alongside is kept, so a single value can be overridden without restating the rest: ``BulkDGD(device = "cuda")`` is still the trained model.
+
+The ensemble the member belongs to is loaded the same way:
+
+.. code-block:: python
+
+   from bulkdgd.ensemble.ensemble import BulkDGDEnsemble
+
+   ensemble = BulkDGDEnsemble()
+
+which is the fifteen members ``seed37``, ``seed41``, ``seed43``, ``seed47``, ``seed53``, ``seed59``, ``seed61``, ``seed67``, ``seed71``, ``seed73``, ``seed79``, ``seed83``, ``seed89``, ``seed97`` and ``seed101``. They differ in nothing but the seed they were trained with: the architecture, the gene universe and the train/test split are identical across all fifteen. The members are built one at a time, as they are asked for, so an ensemble only ever asked for one member only ever loads one.
+
+Where the shipped files are
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Each member has one directory of fitted parameters and one of configuration, named for its seed:
+
+* ``bulkdgd/data/model/<seed>/gmm.pth`` holds the member's fitted Gaussian mixture.
+
+* ``bulkdgd/configs/model/<seed>/model.yaml`` holds its architecture, and ``bulkdgd/configs/model/<seed>/seeds.yaml`` the seeds it was trained with.
+
+* ``bulkdgd/data/model/genes/genes.txt`` holds the gene list, which every member shares.
+
+The decoders are not shipped. Each is 1.79 GiB in ``float64``, so they are release assets, named ``dec_<seed>.pth`` after both the seed and the release, and downloaded once, the first time that member is built, into that member's own directory as ``dec.pth``. See the :doc:`installation instructions <installation>` for the offline case.
+
+.. note::
+
+   A per-member ``model.yaml`` names an architecture and no parameter files, so loading it on its own gives a model of the right shape whose weights have never been trained. This matters for the command-line tools, which build the model from the single configuration file they are given: such a file has to name the parameters as well, by adding ``"latent_pth_file"`` to ``"latent_options"`` and ``"decoder_pth_file"`` to ``"decoder_options"``.
+
+   Setting both to ``"default"`` gives the base member, and only the base member: every member has the same shape, so a non-base member asking for ``"default"`` would be handed ``seed37``'s mixture and decoder without anything failing. Name the two files explicitly to load any other member.
+
+.. note::
+
+   ``bulkdgd/configs/model/model_tgmm_trained.yaml`` and ``bulkdgd/configs/model/model_lgmm_trained.yaml`` describe models shipped before this one and are **superseded**. The first declares 32 mixture components where the shipped mixture has 48, and leaves the scaling factor and the precision at their defaults where the model was trained with ``"median"`` and ``"float64"``; the second describes the legacy 50-dimensional model altogether. A model built from either loads today's parameters into yesterday's description, and is built without complaint.
+
+   Use ``BulkDGD()``, or, for the command-line tools, a configuration file copied from ``bulkdgd/configs/model/seed37/model.yaml`` with the two parameter files added to it.
+
+Options
+-------
+
 The options that can be specified are described below.
 
 * ``"genes_txt_file"`` is the path to the plain text file containing the list of genes used in the model. This file should contain one gene name per line in Ensemble ID format.
@@ -65,13 +126,13 @@ The options that can be specified are described below.
    
    * For the new GMM implementation (``"tgmm"``):
 
-      * ``"n_components"`` is the number of components in the GMM. This is a positive integer that specifies the number of Gaussian components in the mixture.
+      * ``"n_components"`` is the number of components in the GMM. This is a positive integer that specifies the number of Gaussian components in the mixture. If not specified, the default value is ``35``. The models that ship with the package were trained with ``48``.
 
       * ``"covariance_type"`` is the type of covariance to use. This is a string that can take one of the following values:
-         
-         * ``"full"`` for a full covariance matrix. This is the default.
+
+         * ``"full"`` for a full covariance matrix.
          * ``"diag"`` for a diagonal covariance matrix.
-         * ``"spherical"`` for a spherical covariance matrix.
+         * ``"spherical"`` for a spherical covariance matrix. This is the default.
          * ``"tied_full"`` for a full tied covariance matrix.
          * ``"tied_diag"`` for a diagonal tied covariance matrix.
          * ``"tied_spherical"`` for a spherical tied covariance matrix.
@@ -83,12 +144,12 @@ The options that can be specified are described below.
           A ``"low_rank"`` mixture keeps its ``factors_`` and ``psi_`` outside ``covariances_``, so its checkpoint carries keys that no other covariance type writes. Loading a checkpoint written by a different type into a ``"low_rank"`` model raises: the covariance would otherwise stay at its random initialization while every other parameter came from the file, and the model would run without complaint.
 
      * ``"init_means"`` is the method used to initialize the means of the GMM components. This is a string that can take one of the following values:
-         
-         * ``"kmeans"`` for K-means initialization. This is the default value if not specified.
+
+         * ``"kmeans"`` for K-means initialization.
          * ``"kpp"`` for K-means++ initialization.
          * ``"random"`` for random initialization.
          * ``"points"`` for initialization using random points from the dataset.
-         * ``"maxdist"`` for initialization using the points with the maximum determinant of the covariance matrix.
+         * ``"maxdist"`` for initialization using the points with the maximum determinant of the covariance matrix. This is the default value if not specified, and it is what the shipped models were trained with.
     
      * ``"init_weights"`` is the method used to initialize the weights of the GMM components. This is a string that can take one of the following values:
          
@@ -150,23 +211,25 @@ The options that can be specified are described below.
       * ``"poisson"`` for the Poisson output module.
       * ``"nb_feature_dispersion"`` for the negative binomial output module with r-values learned per gene.
       * ``"nb_full_dispersion"`` for the negative binomial output module with r-values learned per gene and sample.
-      * ``"nb_full_dispersion_shrunk"`` as ``"nb_full_dispersion"``, but with the per-sample dispersion shrunk toward a per-gene baseline (see below).
-      * ``"nb_full_dispersion_tied"`` as ``"nb_full_dispersion"``, but with the per-sample dispersion tied to the mean rather than predicted freely (see below).
-      * ``"nb_full_dispersion_shrunk_tied"`` tied to the mean and shrunk (see below).
-      * ``"nb_full_dispersion_hierarchical"`` as ``"nb_full_dispersion_shrunk"``, but with the strength of the shrinkage **learned per gene** rather than fixed (see below).
+      * ``"nb_full_dispersion_tied"`` as ``"nb_full_dispersion"``, but with the per-sample dispersion tied to the mean instead of predicted freely (see below).
+      * ``"nb_full_dispersion_hierarchical"`` as ``"nb_full_dispersion"``, but with the per-sample dispersion pulled toward a per-gene baseline by a strength that is **learned per gene** (see below).
 
-  The four variants of ``"nb_full_dispersion"`` exist because the per-sample dispersion it learns is the noisiest thing the model predicts: it is a free linear projection of the decoder's features to one log-r-value per gene per sample, anchored to nothing, and the likelihood constrains it far less than it constrains the mean. Two models trained alike agree closely on the mean but much less on the dispersion, and since a p-value is a tail probability of the negative binomial, the disagreement lands squarely on significance. The variants give the dispersion structure it otherwise lacks, without giving up the per-gene-per-sample flexibility that makes ``"nb_full_dispersion"`` better at differential expression than ``"nb_feature_dispersion"``:
+  These are the only names accepted: the configuration is checked against the modules the package registers, so a name that is not in this list is an error at load time.
 
-      * ``"nb_full_dispersion_shrunk"`` writes the log-r-value as a per-gene baseline (a parameter fitted across all samples, hence stable) plus a per-sample deviation, and penalizes the deviation - the empirical-Bayes shrinkage of DESeq2 and edgeR.
+  .. note::
+
+     ``"nb_full_dispersion_shrunk"`` and ``"nb_full_dispersion_shrunk_tied"`` were previously implemented and have been **retired**, together with their ``"shrinkage_lambda"`` option: their shrinkage penalty was never applied during training. A configuration that names either of them is rejected when it is loaded. ``"nb_full_dispersion_hierarchical"`` is what to use instead.
+
+  The two variants of ``"nb_full_dispersion"`` exist because the per-sample dispersion it learns is the noisiest thing the model predicts: it is a free linear projection of the decoder's features to one log-r-value per gene per sample, anchored to nothing, and the likelihood constrains it far less than it constrains the mean. Two models trained alike agree closely on the mean but much less on the dispersion, and since a p-value is a tail probability of the negative binomial, the disagreement lands squarely on significance. The variants give the dispersion structure it otherwise lacks, without giving up the per-gene-per-sample flexibility that makes ``"nb_full_dispersion"`` better at differential expression than ``"nb_feature_dispersion"``:
+
       * ``"nb_full_dispersion_tied"`` makes the log-r-value a per-gene intercept plus a slope times the log of the predicted mean, and nothing else - the dispersion borrows the mean's stability, varying per sample only through the mean.
-      * ``"nb_full_dispersion_shrunk_tied"`` is the mean-trend of the tied variant plus a penalized per-sample deviation from it.
-      * ``"nb_full_dispersion_hierarchical"`` gives the per-sample deviation a proper Gaussian prior, ``deviation ~ Normal(0, sigma[gene]^2)``, and **learns** ``sigma`` for each gene.
+      * ``"nb_full_dispersion_hierarchical"`` writes the log-r-value as a per-gene baseline (a parameter fitted across all samples, hence stable) plus a per-sample deviation, gives the deviation a proper Gaussian prior, ``deviation ~ Normal(0, sigma[gene]^2)``, and **learns** ``sigma`` for each gene.
 
-  The last one is worth a paragraph, because the difference between it and ``"nb_full_dispersion_shrunk"`` is not a bigger or smaller penalty but whether the penalty is estimated at all.
+  The second one is worth a paragraph, because what distinguishes it from the empirical-Bayes shrinkage of DESeq2 and edgeR is not a bigger or smaller penalty but whether the penalty is estimated at all.
 
-  A penalty of ``shrinkage_lambda * deviation^2`` is the negative log of a Gaussian prior whose width is fixed at ``1/sqrt(2*shrinkage_lambda)``. One number therefore decides how hard **every** gene in **every** sample is pulled back — and that is the observed failure mode of ``"nb_full_dispersion_shrunk"``: it corrects the tail of the null and simultaneously makes the bulk far too conservative, because the pull that is right for an unstable gene is much too strong for a well-behaved one.
+  A penalty of ``lambda * deviation^2`` is the negative log of a Gaussian prior whose width is fixed at ``1/sqrt(2*lambda)``. One number therefore decides how hard **every** gene in **every** sample is pulled back, and that was the observed failure mode of the retired ``"nb_full_dispersion_shrunk"``: it corrected the tail of the null and made the bulk far too conservative at the same time, because the pull that is right for an unstable gene is much too strong for a well-behaved one.
 
-  The strength cannot simply be turned into a parameter, because a squared penalty has no normalizing constant: widening the prior would only ever lower the loss, so a free strength runs to no shrinkage at all. ``"nb_full_dispersion_hierarchical"`` adds the missing ``log sigma`` term, which is what makes ``sigma`` estimable, and estimates one per gene. Its two limits are the modules on either side of it — as ``sigma`` goes to zero it becomes ``"nb_feature_dispersion"`` (one dispersion per gene), and as ``sigma`` grows it becomes ``"nb_full_dispersion"`` (a free per-sample dispersion) — and which of those a gene sits nearer is decided by its own data rather than imposed.
+  The strength cannot simply be turned into a parameter, because a squared penalty has no normalizing constant: widening the prior would only ever lower the loss, so a free strength runs to no shrinkage at all. ``"nb_full_dispersion_hierarchical"`` adds the missing ``log sigma`` term, which is what makes ``sigma`` estimable, and estimates one per gene. Its two limits are the modules on either side of it - as ``sigma`` goes to zero it becomes ``"nb_feature_dispersion"`` (one dispersion per gene), and as ``sigma`` grows it becomes ``"nb_full_dispersion"`` (a free per-sample dispersion) - and which of those a gene sits nearer is decided by its own data instead of imposed.
 
   Every term is part of the joint log-likelihood the model already maximizes, so finding representations is unchanged in kind: the same MAP, with one more properly normalized prior in the objective.
 
@@ -196,11 +259,6 @@ The options that can be specified are described below.
             * ``"sigmoid"`` for sigmoid activation.
             * ``"softplus"`` for softplus activation.
 
-      * For the shrunk and shrunk-and-tied variants (``"nb_full_dispersion_shrunk"``, ``"nb_full_dispersion_shrunk_tied"``), in addition to ``"activation"``:
-
-         * ``"shrinkage_lambda"`` is how hard the per-sample deviation is pulled toward the baseline. It is a non-negative number: ``0`` recovers the plain ``"nb_full_dispersion"`` module, and a large value recovers the per-gene ``"nb_feature_dispersion"`` module. If not specified, the default value is ``0.5``.
-         * ``"r_init"`` is the value the per-gene baseline dispersion starts at. If not specified, the default value is ``2``.
-
       * For the tied variant (``"nb_full_dispersion_tied"``), in addition to ``"activation"``:
 
          * ``"r_init"`` is the value the per-gene intercept of the dispersion-mean trend starts at. If not specified, the default value is ``2``.
@@ -208,17 +266,19 @@ The options that can be specified are described below.
       * For the hierarchical variant (``"nb_full_dispersion_hierarchical"``), in addition to ``"activation"``:
 
          * ``"sigma_init"`` is the width each gene's prior on the per-sample deviation starts at, in log-r units. It is a positive number, and it should be **small**: training then begins near the stable per-gene dispersion and widens only for the genes whose data ask for it, whereas starting wide begins at the free per-sample dispersion this module exists to move away from. If not specified, the default value is ``0.1``.
-         * ``"sigma_min"`` is the smallest width the prior may take. It is needed because the ``log sigma`` term diverges at zero, and a gene whose per-sample deviations all vanish would otherwise send its own width there. It is ``0.01`` rather than something smaller because the floor states how tight a prior is meant to be believed: per-sample log-r-values move by about 0.2 in natural-log units between two runs differing only in a seed, so a width of 1e-3 calls an ordinary deviation a two-hundred-sigma event and returns a penalty near 1e8. If not specified, the default value is ``0.01``.
+         * ``"sigma_min"`` is the smallest width the prior may take. It is needed because the ``log sigma`` term diverges at zero, and a gene whose per-sample deviations all vanish would otherwise send its own width there. It is ``0.01`` and not something smaller because the floor states how tight a prior is meant to be believed: per-sample log-r-values move by about 0.2 in natural-log units between two runs differing only in a seed, so a width of 1e-3 calls an ordinary deviation a two-hundred-sigma event and returns a penalty near 1e8. If not specified, the default value is ``0.01``.
+         * ``"sigma_prior"`` is the width the per-gene widths are themselves pulled towards. It is a positive number, and it is what makes the optimum exist: without a prior on the widths the objective is unbounded, since a gene whose deviations reach zero sends its own width down after them and ``log sigma`` with it. If not specified, the default value is ``0.1``.
+         * ``"sigma_prior_tau"`` is how far a gene's width may wander from ``"sigma_prior"``, in natural-log units, before that prior objects. It is a positive number, and ``1.0`` is deliberately weak: it leaves a gene free to sit anywhere between roughly a third and three times ``"sigma_prior"`` without a penalty worth the name, and bites only at the collapse the funnel drives towards. If not specified, the default value is ``1.0``.
          * ``"r_init"`` is the value the per-gene baseline dispersion starts at. If not specified, the default value is ``2``.
 
-        Note that there is no ``"shrinkage_lambda"`` here, and its absence is the point: the strength of the pull is what this module estimates rather than what it is told. Note also that its reported loss is **not comparable** to the other modules' — the prior's constant half-log-two-pi term is dropped, since it moves no gradient, but it does move the printed number.
+        Note that there is no fixed shrinkage strength here, and its absence is the point: the strength of the pull is what this module estimates instead of what it is told. Note also that its reported loss is **not comparable** to the other modules' - the prior's constant half-log-two-pi term is dropped, since it moves no gradient, but it does move the printed number.
 
 * ``"scaling_factor"`` is how the scaling factor of a sample is computed - the number the decoder's predicted means are multiplied by to put them on the scale of the sample's own counts. This is a string that can take one of the following values:
 
    * ``"mean"`` for the mean count over all of the sample's genes. This is the default, and it is what every model built before this option existed was trained with.
    * ``"median"`` for the median count over all of the sample's genes.
 
-  The mean is not robust to the few genes that take a large and variable share of a library. In GTEx, the thirteen mitochondrial genes - 0.09% of the 14,895 genes the model is trained on - take 14.49% of all the reads, and the share they take of a single library runs from 0.10% to 90.85%. That moves a sample's mean by up to a factor of eleven, and the mitochondrial fraction is a measure of how the sample was handled rather than of the tissue it came from. Over the same samples, those genes move the median by at most 3.7%.
+  The mean is not robust to the few genes that take a large and variable share of a library. In GTEx, the thirteen mitochondrial genes - 0.09% of the 14,740 genes the model is trained on - take 14.49% of all the reads, and the share they take of a single library runs from 0.10% to 90.85%. That moves a sample's mean by up to a factor of eleven, and the mitochondrial fraction is a measure of how the sample was handled rather than of the tissue it came from. Over the same samples, those genes move the median by at most 3.7%.
 
   Two things are worth knowing before setting this.
 

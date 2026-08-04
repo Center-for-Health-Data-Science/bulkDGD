@@ -33,10 +33,71 @@ __doc__ = "Templates for the different configurations."
 #######################################################################
 
 
+# Import from the standard library.
+import copy
+
 # Import from bulkdgd.
 from bulkdgd import _internals
 from bulkdgd import core
 from . import metrics
+
+
+#######################################################################
+
+
+def _override_items(d, paths2values):
+    """Return a copy of ``d`` with the value at the end of each "key
+    path" REPLACED by the given value.
+
+    Parameters
+    ----------
+    d : :class:`dict`
+        The template, or template section, to copy.
+
+    paths2values : :class:`dict`
+        A mapping from "key path" - a tuple of keys leading to the key
+        to be set - to the value that key should take.
+
+    Returns
+    -------
+    :class:`dict`
+        The copy, with the values replaced.
+    """
+
+    # THIS IS NOT 'bulkdgd._internals.recursive_add_items'. That one
+    # only ADDS a key that is missing: it walks to the end of the path
+    # and, finding the key already there, leaves the value alone. It is
+    # the right thing for filling a template out, and it is the wrong
+    # thing here, because every default this module wants to specialize
+    # - a learning rate for one section that differs from the learning
+    # rate for another, the number of epochs one optimization round
+    # runs for - is a default that the shared template already carries
+    # a value for, and so is precisely the case that function declines
+    # to touch.
+    #
+    # The copy is deep, so that specializing a shared section - and the
+    # optimizer, the scheduler and the per-round options are all shared
+    # between several templates - cannot reach back into the section it
+    # was specialized from.
+    new_d = copy.deepcopy(d)
+
+    # For each key path and the value the key should take
+    for key_path, value in paths2values.items():
+
+        # Start at the top of the copy.
+        current = new_d
+
+        # Walk down to the dictionary holding the last key, creating
+        # the intermediate levels if the template does not have them.
+        for key in key_path[:-1]:
+
+            current = current.setdefault(key, {})
+
+        # Set the value, whether or not the key was already there.
+        current[key_path[-1]] = value
+
+    # Return the copy.
+    return new_d
 
 
 #######################################################################
@@ -527,12 +588,20 @@ _OPTIMIZER_ADAM = {
         },
     
     # The beta parameters for the optimizer.
+    #
+    # A LIST, and not the tuple this used to be. A configuration is
+    # validated more than once on the way to a trained model - when it
+    # is loaded, and again inside the method that consumes it - and the
+    # second pass sees the value the first pass filled in. The check
+    # for a list option asks for an actual 'list', so a tuple default
+    # made every configuration that says nothing about the betas load
+    # cleanly and then be rejected.
     "betas" : {
         "type": (list,),
         "condition": lambda v: len(v) == 2 and \
             all(isinstance(x, (float, int)) for x in v),
         "message": "must be a list of two floats",
-        "default": (0.9, 0.999),
+        "default": [0.9, 0.999],
         },
     }
 
@@ -560,12 +629,20 @@ _OPTIMIZER_ADAMW = {
         },
     
     # The beta parameters for the optimizer.
+    #
+    # A LIST, and not the tuple this used to be. A configuration is
+    # validated more than once on the way to a trained model - when it
+    # is loaded, and again inside the method that consumes it - and the
+    # second pass sees the value the first pass filled in. The check
+    # for a list option asks for an actual 'list', so a tuple default
+    # made every configuration that says nothing about the betas load
+    # cleanly and then be rejected.
     "betas" : {
         "type": (list,),
         "condition": lambda v: len(v) == 2 and \
             all(isinstance(x, (float, int)) for x in v),
         "message": "must be a list of two floats",
-        "default": (0.9, 0.999),
+        "default": [0.9, 0.999],
         },
     }
 
@@ -1094,10 +1171,26 @@ _TRAIN_GMM_FINAL = {
 
 
 # Set the template for the decoder training options.
+#
+# The defaults here are the ones the published ensemble was trained
+# with, so that a configuration which leaves the decoder's training
+# unspecified trains it the way the shipped model's decoder was
+# trained. See 'configs/training/training.yaml', which sets all of them
+# explicitly.
 _TRAIN_DECODER = {
 
     # The options for the optimizer used to train the decoder.
-    **_internals.recursive_add_items(
+    #
+    # THE WEIGHT DECAY IS THE DECODER'S ALONE. It is the part of the
+    # model with the parameters - one weight per latent dimension per
+    # gene - and it is the only part that is regularized this way. The
+    # representations are given no weight decay at all, because
+    # shrinking a representation towards the origin is shrinking it
+    # towards the middle of the latent space, which is a statement
+    # about the sample rather than a regularizer; that is why the two
+    # sections specialize the same optimizer template differently
+    # instead of sharing one.
+    **_override_items(
         d = _OPTIMIZER,
         paths2values = {
             ("optimizer_options",
@@ -1105,19 +1198,35 @@ _TRAIN_DECODER = {
              "cases",
              "adam",
              "lr",
-             "default") : 0.001,
+             "default") : 0.01,
             ("optimizer_options",
              "switch",
              "cases",
              "adamw",
              "lr",
-             "default") : 0.001,
+             "default") : 0.01,
+            ("optimizer_options",
+             "switch",
+             "cases",
+             "adamw",
+             "weight_decay",
+             "default") : 0.1,
             }),
 
     # The options for the learning rate scheduler used to train the
     # decoder.
-    **_LR_SCHEDULER,
-    
+    #
+    # The one-cycle schedule is on by default, because the learning
+    # rate above is the PEAK of that schedule and not a rate to be used
+    # flat: run unscheduled, it is a large constant rate rather than
+    # the rate the model was trained at.
+    **_override_items(
+        d = _LR_SCHEDULER,
+        paths2values = {
+            ("lr_scheduler_type",
+             "default") : "one_cycle",
+            }),
+
     }
 
 
@@ -1125,13 +1234,33 @@ _TRAIN_DECODER = {
 
 
 # Set the template for the representations training options.
+#
+# The defaults here are the ones the published ensemble was trained
+# with, for the same reason the decoder's are. See
+# 'configs/training/training.yaml', which sets all of them explicitly.
 _TRAIN_REPRESENTATIONS = {
 
     # The type of noise to add to the representations during training.
+    #
+    # ON by default, which is what training does and what finding a
+    # representation does not. The representations are free parameters,
+    # one per training sample, and nothing stops a decoder from
+    # memorizing a representation only that one sample can reach;
+    # perturbing them while they are learned forces the decoder to
+    # produce the sample from a NEIGHBOURHOOD of the representation
+    # rather than from a point, which is the property the search for a
+    # new sample's representation later relies on.
+    #
+    # 'none' is a CHOICE and not only a value the default used to take.
+    # A configuration is validated more than once on the way to a
+    # trained model - when it is loaded, and again inside 'train' - and
+    # the second pass sees the key the first pass filled in, so a
+    # 'none' that was not also a legal value made every configuration
+    # saying nothing about the noise load and then be rejected.
     "train_noise_type" : {
         "type": (str, type(None)),
-        "choices": ["gaussian"],
-        "default": "none",
+        "choices": ["gaussian", "none"],
+        "default": "gaussian",
         },
 
     # The options for the noise to add to the representations during
@@ -1146,9 +1275,9 @@ _TRAIN_REPRESENTATIONS = {
                         "type": (float, int),
                         "condition": lambda v: v >= 0,
                         "message": "must be a non-negative number",
-                        "default": 0.0,
+                        "default": 0.1,
                         },
-                    
+
                     "start" : {
                         "type": (float, int),
                         "condition": lambda v: v >= 0,
@@ -1170,11 +1299,19 @@ _TRAIN_REPRESENTATIONS = {
                         "default": 0.95,
                         },
                     
+                    # The final multiplier on the noise.
+                    #
+                    # Four, which is what the shipped model was trained
+                    # with. It is not a free parameter for anything
+                    # meaning to reproduce that model: a different gain
+                    # perturbs the representations by a different
+                    # amount than the ones this decoder was fitted
+                    # against were perturbed by.
                     "gain" : {
                         "type": (float, int),
                         "condition": lambda v: v >= 0,
                         "message": "must be a non-negative number",
-                        "default": 1.0,
+                        "default": 4.0,
                         },
                     },
                 },
@@ -1182,7 +1319,9 @@ _TRAIN_REPRESENTATIONS = {
         },
 
     # The options for the optimizer used to train the representations.
-    **_internals.recursive_add_items(
+    #
+    # NO WEIGHT DECAY, unlike the decoder's - see there for why.
+    **_override_items(
         d = _OPTIMIZER,
         paths2values = {
             ("optimizer_options",
@@ -1190,19 +1329,30 @@ _TRAIN_REPRESENTATIONS = {
              "cases",
              "adam",
              "lr",
-             "default") : 0.001,
+             "default") : 0.01,
             ("optimizer_options",
              "switch",
              "cases",
              "adamw",
              "lr",
-             "default") : 0.001,
+             "default") : 0.01,
             }),
 
     # The options for the learning rate scheduler used to train the
     # representations.
-    **_LR_SCHEDULER,
-    
+    #
+    # The representations are scheduled on epochs and the decoder on
+    # batches, but the two are given the same shape on purpose: a
+    # decoder annealing towards its final weights while the
+    # representations it is fitted against are still moving at their
+    # starting rate is a decoder fitted to a moving target.
+    **_override_items(
+        d = _LR_SCHEDULER,
+        paths2values = {
+            ("lr_scheduler_type",
+             "default") : "one_cycle",
+            }),
+
     }
 
 
@@ -1210,6 +1360,14 @@ _TRAIN_REPRESENTATIONS = {
 
 
 # Set the template for the loss options.
+#
+# THE NORMALIZATION IS PER SAMPLE BY DEFAULT, which is what the
+# published runs used. The cohorts a representation is found for differ
+# in size by orders of magnitude - a few dozen samples for one disease,
+# thousands for TCGA - so an unnormalized loss says more about how many
+# samples were in the file than about how well the model reached them,
+# and the number is looked at precisely to compare one cohort with
+# another.
 _LOSS_OPTIONS = {
 
     # The type of reduction to use for the loss.
@@ -1218,7 +1376,7 @@ _LOSS_OPTIONS = {
         "choices": ["mean", "sum"],
         "default": "sum",
         },
-    
+
     # The options for the normalization of the loss for the latent
     # space.
     "latent" : {
@@ -1226,7 +1384,7 @@ _LOSS_OPTIONS = {
             "type": (str,),
             "choices": \
                 ["none", "n_samples", "n_samples * latent_dim"],
-            "default": "none"},
+            "default": "n_samples"},
         "lambda" : {
             "type": (float, int),
             "condition": lambda v: v >= 0,
@@ -1234,24 +1392,24 @@ _LOSS_OPTIONS = {
             "default": 1.0,
             },
         },
-    
+
     # The options for the normalization of the loss for the decoder.
     "decoder" : {
         "norm_type" : {
             "type": (str,),
             "choices": \
                 ["none", "n_samples", "n_samples * n_genes"],
-            "default": "none",
+            "default": "n_samples",
             },
         },
-    
+
     # The options for the normalization of the loss for the total loss.
     "total" : {
         "norm_type" : {
             "type": (str,),
             "choices": \
                 ["none", "n_samples", "n_samples * n_genes"],
-            "default": "none",
+            "default": "n_samples",
             },
         },
     }
@@ -1264,8 +1422,14 @@ _LOSS_OPTIONS = {
 _REPORTING_OPTIONS = {
 
     # The options for the loss.
+    #
+    # THE NORMALIZATION IS PER SAMPLE BY DEFAULT, which is what the
+    # published runs used. The training and test splits do not hold the
+    # same number of samples, so an unnormalized loss cannot be
+    # compared between them - and that comparison is what the loss is
+    # written out for.
     "loss" : {
-    
+
         # The options for the normalization of the loss for the latent
         # space.
         "latent" : {
@@ -1273,10 +1437,10 @@ _REPORTING_OPTIONS = {
                 "type": (str,),
                 "choices": \
                     ["none", "n_samples", "n_samples * latent_dim"],
-                "default": "none",
+                "default": "n_samples",
                 },
             },
-        
+
         # The options for the normalization of the loss for the
         # decoder.
         "decoder" : {
@@ -1284,10 +1448,10 @@ _REPORTING_OPTIONS = {
                 "type": (str,),
                 "choices": \
                     ["none", "n_samples", "n_samples * n_genes"],
-                "default": "none",
+                "default": "n_samples",
                 },
             },
-        
+
         # The options for the normalization of the loss for the total
         # loss.
         "total" : {
@@ -1295,21 +1459,35 @@ _REPORTING_OPTIONS = {
                 "type": (str,),
                 "choices": \
                     ["none", "n_samples", "n_samples * n_genes"],
-                "default": "none",
+                "default": "n_samples",
                 },
             },
         },
 
     # The options for the metrics to calculate during training.
     "metrics" : {
-        
+
         # The options for the metrics to calculate for the latent
         # space.
+        #
+        # The six the published ensemble was trained with. The first
+        # four are unsupervised and are always available; the last two
+        # compare the mixture's components against ground-truth labels,
+        # so they are calculated only if labels were passed to 'train'
+        # and are dropped with a warning if they were not. Asking for
+        # them by default therefore costs nothing to a caller who has
+        # no labels, and saves the caller who does from having to know
+        # to ask.
         "latent" : {
             "type" : (list,),
             "choices" : [*list(metrics.UNSUPERVISED_METRICS.keys()),
                          *list(metrics.SUPERVISED_METRICS.keys())],
-            "default" : ["silhouette_score"],
+            "default" : ["bic",
+                         "silhouette_score",
+                         "davies_bouldin_score",
+                         "calinski_harabasz_score",
+                         "adjusted_rand_index_score",
+                         "adjusted_mutual_info_score"],
             },
         },
     
@@ -1536,7 +1714,13 @@ _REP_OPTIMIZATION = {
     # '_get_representations_two_opt' actually reads 'optimizer_type'/
     # 'optimizer_options', and matching '_TRAIN_DECODER''s pattern --
     # not nested under an 'optimizer' key).
-    **_internals.recursive_add_items(
+    #
+    # The learning rate is the one every published set of
+    # representations was found at, and is ten times the optimizer's
+    # own default: a representation is being optimized from scratch
+    # against a fixed decoder, not nudged from a good starting point,
+    # and there are only a few hundred epochs to get there in.
+    **_override_items(
         d = _OPTIMIZER,
         paths2values = \
             {("optimizer_options",
@@ -1691,17 +1875,34 @@ _REP_TWO_OPT_TGMM = {
         },
 
     # The options for the first optimization of the representations.
+    #
+    # THE EPOCH COUNTS ARE THE PUBLISHED ONES. This round optimizes
+    # every candidate of every sample, and its only job is to make the
+    # selection between them meaningful: a candidate that is behind
+    # because it started further away has to be given enough steps to
+    # catch up, or the selection picks the luckiest initialization
+    # rather than the best component.
     "optimization_1" : \
-        _internals.recursive_add_items(
+        _override_items(
             d = _REP_OPTIMIZATION,
             paths2values = \
                 {("epochs",
-                  "default") : 10}), 
+                  "default") : 300}),
 
     # The options for the second optimization of the representations.
-    "optimization_2" : _REP_OPTIMIZATION,
+    #
+    # Longer than the first, because this is the round whose answer is
+    # kept. The first only has to rank the candidates; this one has to
+    # converge the winner, and it is optimizing one representation per
+    # sample rather than one per component per sample, so the extra
+    # epochs cost a fraction of what they would have cost above.
+    "optimization_2" : \
+        _override_items(
+            d = _REP_OPTIMIZATION,
+            paths2values = \
+                {("epochs",
+                  "default") : 500}),
 
-    
     }
 
 
@@ -1820,9 +2021,16 @@ CONFIG_TRAIN = {
     "reporting_options" : _REPORTING_OPTIONS,
     
     # The type of latent space used in the model.
+    #
+    # 'tgmm' is the latent space the published model has, and the one
+    # every model trained with this package since it existed has. The
+    # legacy implementation has to be asked for by name, because a
+    # training configuration that does not say which latent space it is
+    # for is not a configuration for the legacy one.
     "latent_type" : {
         "type": (str,),
-        "choices": ["lgmm", "tgmm"]
+        "choices": ["lgmm", "tgmm"],
+        "default": "tgmm",
         },
 
     # The options for the latent space in the training configuration.
@@ -1900,17 +2108,28 @@ CONFIG_REP = {
     # collapsed away, because the point of it is that a scheme can be
     # added, and adding one should be writing a case and not rebuilding
     # the dispatch.
+    # 'two_opt' is the default because it is the scheme every published
+    # set of representations was found with, and because it is the one
+    # that returns a single representation per sample; the multi-seed
+    # scheme returns one per seed, which is a different output and has
+    # to be asked for.
     "scheme_type" : {
         "type": (str,),
         "choices": ["two_opt", "two_opt_multiseed"],
+        "default": "two_opt",
         },
 
     # The type of latent space used in the model.
+    #
+    # It must be the latent space the model being used actually has.
+    # 'tgmm' is the shipped model's, and the legacy implementation has
+    # to be asked for by name.
     "latent_type" : {
         "type": (str,),
         "choices": ["lgmm", "tgmm"],
+        "default": "tgmm",
         },
-    
+
     # The number of initial representations to sample per component of
     # the latent space.
     "n_rep_per_comp" : {
@@ -1919,14 +2138,22 @@ CONFIG_REP = {
         "message": "must be a positive integer",
         "default": 1,
         },
-    
+
     # The options for the data loader for the new set of samples.
+    #
+    # A BATCH HERE IS NOT A BATCH OF SAMPLES. Every sample carries one
+    # candidate representation per component of the mixture through the
+    # first optimization, so with a few dozen components a batch of
+    # sixteen samples is already several hundred representations being
+    # optimized at once. That is what the sixteen has to be read
+    # against, and it is why it is so much smaller than a training
+    # batch.
     "data_loader_options" : {
         "batch_size" : {
             "type": (int,),
             "condition": lambda v: v > 0,
             "message": "must be a positive integer",
-            "default": 128,
+            "default": 16,
             },
         "shuffle" : {
             "type": (bool,),

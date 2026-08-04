@@ -96,6 +96,7 @@ packages = \
      "bulkdgd._internals",
      "bulkdgd.analysis",
      "bulkdgd.core",
+     "bulkdgd.ensemble",
      "bulkdgd.execs",
      "bulkdgd.genes",
      "bulkdgd.ioutil",
@@ -110,13 +111,20 @@ package_data = \
          "configs/dimensionality_reduction/*yaml",
          "configs/genes/*.yaml",
          "configs/model/*.yaml",
+         # One directory per member of the shipped ensemble, holding
+         # that member's architecture and the seeds it was trained
+         # with. Without this line an installed package has no model
+         # configuration to load and 'BulkDGD()' cannot build itself.
+         "configs/model/*/*.yaml",
          "configs/plotting/*.yaml",
          "configs/representations/*.yaml",
          "configs/training/*.yaml",
          # Data files
          "data/model/genes/*.txt",
-         "data/model/gmm/*.pth",
-         "data/model/dec/*pth",
+         # Each member's fitted mixture, 28 KB apiece. The decoders
+         # are NOT here: at 1.79 GiB each they are release assets,
+         # downloaded into the member's own directory on first use.
+         "data/model/*/gmm.pth",
          "data/*.md"],
      
      # 'recount3' package

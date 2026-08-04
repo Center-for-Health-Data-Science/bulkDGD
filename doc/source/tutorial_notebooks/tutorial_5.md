@@ -67,12 +67,14 @@ ioutil$save_samples(df = df_preproc, csv_file = "samples_preprocessed.csv", sep 
 
 ## Find the representations
 
-`"model_tgmm_trained"` is the pre-trained model shipped with bulkdgd (Gaussian-mixture latent space + decoder, trained on GTEx data); `"two_opt"` is bulkdgd's default two-round optimisation scheme. Both are bare names resolved against bulkdgd's own packaged configuration directories - pass a full path instead to use your own YAML config file (see the [model](../model_config_options.rst) and [representation-finding](../rep_config_options.rst) configuration options).
+`"two_opt"` is bulkdgd's default two-round optimisation scheme, passed as a bare name because bare names are resolved against bulkdgd's own packaged configuration directories.
+
+The model's configuration is passed as a path instead. The pre-trained model shipped with bulkdgd (Gaussian-mixture latent space + decoder, trained on GTEx data) has one configuration file per member of the ensemble, in a sub-directory that the bare-name lookup does not reach, and those files name an architecture and no parameter files. Copy `bulkdgd/configs/model/seed37/model.yaml` next to your samples as `model_trained.yaml`, add `latent_pth_file: "default"` under `latent_options` and `decoder_pth_file: "default"` under `decoder_options`, and pass the copy. See the [model](../model_config_options.rst) and [representation-finding](../rep_config_options.rst) configuration options for the details, including why the older `"model_tgmm_trained"` should no longer be used.
 
 ```r
 run_bulkdgd_cli("bulkdgd_find_representations", c(
   "-is", "samples_preprocessed.csv",
-  "-cm", "model_tgmm_trained",
+  "-cm", "model_trained.yaml",
   "-cr", "two_opt",
   "-or", "representations.csv",
   "-om", "pred_means.csv",

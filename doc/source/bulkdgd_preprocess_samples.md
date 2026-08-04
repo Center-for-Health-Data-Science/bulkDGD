@@ -12,7 +12,7 @@ In detail, sample preprocessing consists of the following steps:
 
 1. Removing duplicated samples.
 2. Removing samples containing missing values for the expression of some genes.
-3. Excluding all data for genes that are not included in a user-provided list. The default list used corresponds to the genes included in the bulkdgd model and can be found in a plain text file (`genes.txt`) available in `bulkdgd/data/model/genes`.
+3. Excluding all data for genes that are not included in a user-provided list. The default list used corresponds to the genes included in the bulkdgd model and can be found in a plain text file (`genes.txt`) available in `bulkdgd/data/model/genes`. It is the curated list of **14,740** genes the shipped models were trained on, and every member of the shipped ensemble shares it.
 4. Adding a count of 0 for all genes not found in the input samples but part of the set of genes used to train the bulkdgd model.
 5. Sorting the genes in the order expected by the bulkdgd model.
 

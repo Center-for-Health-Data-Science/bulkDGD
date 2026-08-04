@@ -6,15 +6,15 @@ This command allows you to get representations in the latent space defined by th
 
 It is recommended that the samples are preprocessed with [`bulkdgd_preprocess_samples`](bulkdgd_preprocess_samples.md) before running `bulkdgd_find_representations`.
 
-`bulkdgd_find_representations` also needs a YAML configuration file specifying the bulkdgd model's parameters, an example of which can be found in `bulkdgd/configs/model` (`model_tgmm_trained.yaml` for the current Gaussian mixture model implementation, or `model_lgmm_trained.yaml` for the legacy one).
+`bulkdgd_find_representations` also needs a YAML configuration file specifying the bulkdgd model's parameters. The architecture of each member of the shipped ensemble is in `bulkdgd/configs/model/<seed>/model.yaml`, with `seed37` the member the paper reports. These files name an architecture and no parameter files, so a configuration file for this executable has to add `latent_pth_file` and `decoder_pth_file` to them: copy `bulkdgd/configs/model/seed37/model.yaml`, set both options to `default`, and pass the copy. See the [model configuration options](model_config_options.rst) for what `default` resolves to and why the older `model_tgmm_trained.yaml` and `model_lgmm_trained.yaml` should no longer be used.
 
 The executable also needs a configuration file defining the data loading and optimization options for finding the representations. Several examples are available in `bulkdgd/configs/representations`.
 
 To run the executable, you also need the trained bulkdgd model, which comes in two PyTorch files:
 
-* A file containing the trained parameters of the Gaussian mixture model describing the latent space. If the `latent_pth_file` option is set to `default` in the model's configuration file, the file `bulkdgd/data/model/gmm/gmm.pth` is loaded.
+* A file containing the trained parameters of the Gaussian mixture model describing the latent space. It ships with the package, one per member, as `bulkdgd/data/model/<seed>/gmm.pth`. If the `latent_pth_file` option is set to `default` in the model's configuration file, `bulkdgd/data/model/seed37/gmm.pth` is loaded.
 
-* A file containing the trained decoder for the original model with the decoder's output module configured to `nb_feature_dispersion`. Since the file is too big to be hosted on GitHub, you can find it [here](https://drive.google.com/file/d/1GKMkVmmcEH8glNrQ4092VWYQgq6maYW1/view?usp=sharing). Save it locally and specify its path in the configuration file, or move it to `bulkdgd/data/model/dec` with the name `dec.pth`. In this latter case, setting the `decoder_pth_file` option to `default` in the model's configuration file automatically loads the correct file.
+* A file containing the trained decoder, whose output module is `nb_full_dispersion`. It is 1.79 GiB in `float64`, too big to ship with the package, so it is a release asset named `dec_<seed>.pth` and is downloaded automatically the first time that member is built, into `bulkdgd/data/model/<seed>/dec.pth`. If the `decoder_pth_file` option is set to `default` in the model's configuration file, `bulkdgd/data/model/seed37/dec.pth` is used, downloading it if it is not there yet. To use a decoder you have elsewhere, specify its path in the configuration file instead.
 
 `bulkdgd_find_representations` produces three to four output files:
 
@@ -104,7 +104,21 @@ bulkdgd_find_representations [-h] -is INPUT_SAMPLES [-or OUTPUT_REP] [-om OUTPUT
 ## Example
 
 ```
-bulkdgd_find_representations -is samples_preprocessed.csv -cm model_tgmm_trained.yaml -cr two_opt.yaml
+bulkdgd_find_representations -is samples_preprocessed.csv -cm model_trained.yaml -cr two_opt
 ```
 
-This finds the best representations in latent space for the samples in `samples_preprocessed.csv` (as produced by [`bulkdgd_preprocess_samples`](bulkdgd_preprocess_samples.md)), using the trained model described in `model_tgmm_trained.yaml` and the two-round optimization scheme described in `two_opt.yaml`.
+This finds the best representations in latent space for the samples in `samples_preprocessed.csv` (as produced by [`bulkdgd_preprocess_samples`](bulkdgd_preprocess_samples.md)), using the trained model described in `model_trained.yaml` and the two-round optimization scheme described in `two_opt`.
+
+Here, `model_trained.yaml` is a copy of `bulkdgd/configs/model/seed37/model.yaml` with the two parameter files added to it:
+
+```yaml
+latent_options:
+  # ... as in bulkdgd/configs/model/seed37/model.yaml ...
+  latent_pth_file: "default"
+
+decoder_options:
+  # ... as in bulkdgd/configs/model/seed37/model.yaml ...
+  decoder_pth_file: "default"
+```
+
+`two_opt` is passed as a bare name because it ships in `bulkdgd/configs/representations`, and a name **without an extension** is looked up there. Anything else, including the same name written as `two_opt.yaml`, is taken as a path relative to the working directory. The per-member model configurations sit in a sub-directory of `bulkdgd/configs/model`, which that lookup does not reach, so the model's configuration file is always passed as a path.

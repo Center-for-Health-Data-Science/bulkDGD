@@ -8804,7 +8804,7 @@ class BulkDGD(nn.Module):
               df_samples: pd.DataFrame,
               names_train: list,
               names_test: list,
-              config_train: dict[str, object],
+              config_train: Optional[dict[str, object]] = None,
               gmm_pth_file: str = "gmm.pth",
               dec_pth_file: str = "dec.pth",
               gmm_final_pth_file: str = "gmm_final.pth",
@@ -8920,6 +8920,23 @@ class BulkDGD(nn.Module):
         df_time : :class:`pandas.DataFrame`
             A data frame containing the training-time metrics.
         """
+
+        #-------------------------------------------------------------#
+
+        # NO CONFIGURATION MEANS THE ONE THE SHIPPED MODELS USED.
+        #
+        # Imported here, not at module level: 'ioutil' imports
+        # 'core._util', so importing it at the top of this module
+        # would close a cycle.
+        if config_train is None:
+
+            from bulkdgd.ioutil import configio
+
+            config_train = configio.load_config_train(config_file = None)
+
+            logger.info(
+                "No training configuration was given, so the one the "
+                "published ensemble was trained with is used.")
 
         #-------------------------------------------------------------#
 

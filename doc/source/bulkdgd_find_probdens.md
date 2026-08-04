@@ -25,7 +25,7 @@ The command can be run in parallel over different inputs in different directorie
 ## Command line
 
 ```
-bulkdgd_find_probdens [-h] -ir INPUT_REP [-or OUTPUT_PROB_REP] [-oc OUTPUT_PROB_COMP] -cm CONFIG_FILE_MODEL [-d WORK_DIR] [-lf LOG_FILE] [-lc] [-v] [-vv] [-p] [-n N_PROC] [-ds DIRS [DIRS ...]]
+bulkdgd_find_probdens [-h] -ir INPUT_REP [-opr OUTPUT_PROB_REP] [-opc OUTPUT_PROB_COMP] -cm CONFIG_FILE_MODEL [-d WORK_DIR] [-lf LOG_FILE] [-lc] [-v] [-vv] [-p] [-n N_PROC] [-ds DIRS [DIRS ...]]
 ```
 
 ## Options
@@ -81,7 +81,9 @@ bulkdgd_find_probdens [-h] -ir INPUT_REP [-or OUTPUT_PROB_REP] [-oc OUTPUT_PROB_
 ## Example
 
 ```
-bulkdgd_find_probdens -ir representations.csv -cm model_tgmm_trained.yaml
+bulkdgd_find_probdens -ir representations.csv -cm model_trained.yaml
 ```
 
-This computes, for each representation in `representations.csv` (as produced by [`bulkdgd_find_representations`](bulkdgd_find_representations.md)), the probability density with respect to each component of the Gaussian mixture model defined in `model_tgmm_trained.yaml`.
+This computes, for each representation in `representations.csv` (as produced by [`bulkdgd_find_representations`](bulkdgd_find_representations.md)), the probability density with respect to each component of the Gaussian mixture model defined in `model_trained.yaml`.
+
+`model_trained.yaml` is a copy of `bulkdgd/configs/model/seed37/model.yaml` with `latent_pth_file` and `decoder_pth_file` added to it, as described in [`bulkdgd_find_representations`](bulkdgd_find_representations.md) and in the [model configuration options](model_config_options.rst). The superseded `model_tgmm_trained.yaml` should no longer be used: it declares 32 mixture components where the shipped mixture has 48.

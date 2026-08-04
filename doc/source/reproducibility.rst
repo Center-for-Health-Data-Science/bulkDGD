@@ -29,6 +29,8 @@ Constructing the model is already random. :class:`torch.nn.Linear` draws its wei
 
 Building a model also *consumes* the generator's stream, so anything drawn afterwards - the representations' initialization, the order of the batches, the noise added during training - continues from where the decoder left off. This is why the seed is set once, at the top, rather than before each thing that draws.
 
+This is about a model built from an architecture. A model built from fitted parameters - a bare ``BulkDGD()``, or a configuration naming a ``"decoder_pth_file"`` - has its drawn weights overwritten by the checkpoint, so the seed decides nothing about them. It still decides everything drawn afterwards, which for such a model is the search for a representation, so the seed is set before the model is built either way.
+
 The same applies to :func:`torch.set_default_dtype`: a model built before the default dtype is changed is built in the old one.
 
 What is seeded

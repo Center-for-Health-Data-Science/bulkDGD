@@ -11,7 +11,7 @@ The output of `bulkdgd_dea` is a CSV file for each sample containing the results
 ## Command line
 
 ```
-bulkdgd_dea [-h] -is INPUT_SAMPLES -im INPUT_MEANS [-iv INPUT_RVALUES] [-odp OUTPUT_DEA_PREFIX] [-ogp OUTPUT_GSEA_PREFIX] [-mg] [-pr P_VALUES_RESOLUTION] [-pt P_VALUES_THRESHOLD] [-qa Q_VALUES_ALPHA] [-qm Q_VALUES_METHOD] [-qt Q_VALUES_THRESHOLD] [-fct LOG2_FOLD_CHANGE_THRESHOLD] [-gsf GENES_SETS_FILES [GENES_SETS_FILES ...]] [-n N_PROC] [-d WORK_DIR] [-lf LOG_FILE] [-lc] [-v] [-vv]
+bulkdgd_dea [-h] -is INPUT_SAMPLES -im INPUT_MEANS [-iv INPUT_RVALUES] [-odp OUTPUT_DEA_PREFIX] [-ogp OUTPUT_GSEA_PREFIX] [-mg] [-pr P_VALUES_RESOLUTION] [-pt P_VALUES_THRESHOLD] [-qa Q_VALUES_ALPHA] [-qm Q_VALUES_METHOD] [-qt Q_VALUES_THRESHOLD] [-fct LOG2_FOLD_CHANGE_THRESHOLD] [-gsf GENES_SETS_FILES [GENES_SETS_FILES ...]] [-n N_PROC] [-dev DEVICE] [-pm {auto,batched,per-gene}] [-d WORK_DIR] [-lf LOG_FILE] [-lc] [-v] [-vv]
 ```
 
 ## Options
