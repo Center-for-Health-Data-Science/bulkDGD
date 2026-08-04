@@ -53,10 +53,48 @@ logger = log.getLogger(__name__)
 #######################################################################
 
 
+def _get_scaling_factors(obs, scaling_factor = "mean",
+                         config_model = None):
+    """The number each sample's predicted means have to be multiplied
+    by to become counts.
+
+    The decoder writes its means SCALED, and what they are scaled by
+    is a property of the model, not of this function: a model trained
+    with 'scaling_factor: "median"' predicts means relative to the
+    median count of a sample, and multiplying those by the MEAN count
+    inflates every prediction. Counts are heavy-tailed, so the mean
+    runs well above the median and the inflation is large - every
+    observed count then falls low in its own predicted distribution
+    and the residuals come out systematically negative rather than
+    standard normal.
+
+    Pass 'config_model' and the model's own scaling factor is used,
+    which is the only way to be sure the two agree.
+    """
+
+    if config_model is not None:
+
+        scaling_factor = \
+            config_model.get("scaling_factor", scaling_factor) \
+            if hasattr(config_model, "get") else scaling_factor
+
+    if scaling_factor == "median":
+        return np.median(obs, axis = 1, keepdims = True)
+
+    if scaling_factor == "mean":
+        return obs.mean(axis = 1, keepdims = True)
+
+    raise ValueError(
+        f"Unrecognized scaling factor '{scaling_factor}' - it must "
+        f"be 'mean' or 'median'.")
+
+
 def get_residuals(obs_counts: pd.Series,
                   pred_means: pd.Series,
                   r_values: Optional[pd.Series] = None,
-                  sample_name: Optional[str] = None) -> pd.Series:
+                  sample_name: Optional[str] = None,
+                  scaling_factor: str = "mean",
+                  config_model: Optional[dict] = None) -> pd.Series:
     """Calculate the vector of residuals between the observed gene
     expression (counts) and the predicted means of the negative
     binomials modeling the expression of the different genes for a
@@ -179,14 +217,20 @@ def get_residuals(obs_counts: pd.Series,
     # Get the mean gene counts for the sample.
     #
     # The output is a single value.
-    obs_counts_mean = np.mean(obs_counts)
+    # Get the scaling factor for the sample - the model's own, when
+    # 'config_model' says what it is.
+    obs_counts_scale = \
+        _get_scaling_factors(
+            np.asarray(obs_counts, dtype = np.float64).reshape(1, -1),
+            scaling_factor = scaling_factor,
+            config_model = config_model)[0, 0]
 
     #-----------------------------------------------------------------#
 
-    # Rescale the predicted means by the mean gene counts.
+    # Rescale the predicted means by it.
     #
     # The output is a 1D tensor containing the rescaled means.
-    pred_means = pred_means * obs_counts_mean
+    pred_means = pred_means * obs_counts_scale
 
     #-----------------------------------------------------------------#
 
@@ -304,7 +348,9 @@ def get_residuals(obs_counts: pd.Series,
 def get_residuals_df(df_obs_counts: pd.DataFrame,
                      df_pred_means: pd.DataFrame,
                      df_r_values: Optional[pd.DataFrame] = None,
-                     clip: float = 0.0) -> pd.DataFrame:
+                     clip: float = 0.0,
+                     scaling_factor: str = "mean",
+                     config_model: Optional[dict] = None) -> pd.DataFrame:
     """Calculate the residuals of many samples at once.
 
     This is :func:`get_residuals`, which takes one sample and walks its
@@ -336,6 +382,23 @@ def get_residuals_df(df_obs_counts: pd.DataFrame,
         negative binomial distributions. If they are not given, the
         counts are taken to have been modelled with Poisson
         distributions.
+
+    scaling_factor : :class:`str`, ``"mean"``
+        Whether the predicted means are scaled by the ``"mean"`` or
+        the ``"median"`` count of a sample.
+
+        This has to match what the MODEL was trained with. The default
+        is ``"mean"`` for backward compatibility only - it is the
+        wrong value for any model whose configuration says
+        ``scaling_factor: "median"``, and getting it wrong shifts every
+        residual in one direction rather than adding noise. On the base
+        model, which is a median model, using the mean puts the mean
+        residual at about -1.7 instead of 0.
+
+    config_model : :class:`dict`, optional
+        The model's configuration. When given, its ``scaling_factor``
+        is used and the argument above is ignored - which is the only
+        way to be certain the residuals and the model agree.
 
     clip : :class:`float`, ``0.0``
         How far from nought and one to hold the cumulative distribution
@@ -379,9 +442,12 @@ def get_residuals_df(df_obs_counts: pd.DataFrame,
 
     #-----------------------------------------------------------------#
 
-    # A predicted mean is not a count until it is rescaled by the mean
-    # count of the sample it was predicted for.
-    means = means * obs.mean(axis = 1, keepdims = True)
+    # A predicted mean is not a count until it is rescaled by the
+    # scaling factor of the sample it was predicted for - and which
+    # factor that is belongs to the model, not to this function.
+    means = means * _get_scaling_factors(
+        obs, scaling_factor = scaling_factor,
+        config_model = config_model)
 
     #-----------------------------------------------------------------#
 
