@@ -322,9 +322,15 @@ class TrainingDiagnostics:
             df.index = sample_names
             df.index.name = "sample"
 
-        df.to_csv(
+        # Parquet, like every other per-epoch output of a training
+        # run. This is one file an epoch and it is a record the run is
+        # reconstructed from; text moves a float64 by about 1e-12.
+        df.to_parquet(
             os.path.join(self._output_dir,
-                         f"per_sample_epoch_{epoch}.csv"))
+                         f"per_sample_epoch_{epoch}.parquet"),
+            engine = "pyarrow",
+            compression = "snappy",
+            index = True)
 
         # The concentration of the pull, which is the number the whole
         # exercise is about: how much of the total gradient norm the

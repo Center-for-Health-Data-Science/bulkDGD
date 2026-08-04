@@ -56,6 +56,9 @@ import zipfile
 # Import from third-party libraries.
 import pandas as pd
 
+# Import from the package.
+from .tableio import is_parquet, resolve_name, READ_EXTENSIONS
+
 
 #######################################################################
 
@@ -195,9 +198,6 @@ def has_sample(dea_dir: str,
         Whether the sample is present.
     """
 
-    # Get the name the sample's file would have.
-    name = f"{prefix}{sample}.csv"
-
     # Get the path to the archive.
     zip_path = _get_zip_path(dea_dir)
 
@@ -209,13 +209,15 @@ def has_sample(dea_dir: str,
         # Get the archive's members' names.
         _, names = _get_archive(zip_path)
 
-        # Return whether the sample is one of them.
-        return name in names
+        # Present in whichever format, since both are on disk.
+        return resolve_name(f"{prefix}{sample}", names) is not None
 
     #-----------------------------------------------------------------#
 
-    # Otherwise, return whether the loose file is there.
-    return os.path.isfile(os.path.join(dea_dir, name))
+    # Otherwise, whether a loose file is there in either format.
+    listing = os.listdir(dea_dir) if os.path.isdir(dea_dir) else []
+
+    return resolve_name(f"{prefix}{sample}", listing) is not None
 
 
 #---------------------------------------------------------------------#
@@ -251,9 +253,6 @@ def read_dea(dea_dir: str,
         present.
     """
 
-    # Get the name the sample's file would have.
-    name = f"{prefix}{sample}.csv"
-
     # Get the path to the archive.
     zip_path = _get_zip_path(dea_dir)
 
@@ -265,8 +264,15 @@ def read_dea(dea_dir: str,
         # Get the archive and its members' names.
         archive, names = _get_archive(zip_path)
 
+        # WHICHEVER FORMAT IS IN THERE. New runs write Parquet, and the
+        # archives already on disk hold text, so the member is looked up
+        # by its stem and taken in whatever form it was stored in. A
+        # reader that hardcoded one extension would be wrong for half
+        # the data the moment the writer changed.
+        member = resolve_name(f"{prefix}{sample}", names)
+
         # If the sample is not in the archive
-        if name not in names:
+        if member is None:
 
             # Return nothing.
             return None
@@ -274,23 +280,32 @@ def read_dea(dea_dir: str,
         # Read the member straight out of the archive. It is read in
         # full before being parsed because the handle the archive
         # gives is not seekable, and the parser may need to seek.
-        with archive.open(name) as handle:
-            return pd.read_csv(io.BytesIO(handle.read()),
-                               **read_csv_kwargs)
+        with archive.open(member) as handle:
+
+            data = io.BytesIO(handle.read())
+
+            return (pd.read_parquet(data) if is_parquet(member)
+                    else pd.read_csv(data, **read_csv_kwargs))
 
     #-----------------------------------------------------------------#
 
-    # Get the path to the loose file.
-    path = os.path.join(dea_dir, name)
+    # The same question, for a directory that has not been packed.
+    listing = os.listdir(dea_dir) if os.path.isdir(dea_dir) else []
+
+    member = resolve_name(f"{prefix}{sample}", listing)
 
     # If the file is not there
-    if not os.path.isfile(path):
+    if member is None:
 
         # Return nothing.
         return None
 
+    # Get the path to the loose file.
+    path = os.path.join(dea_dir, member)
+
     # Read the file.
-    return pd.read_csv(path, **read_csv_kwargs)
+    return (pd.read_parquet(path) if is_parquet(path)
+            else pd.read_csv(path, **read_csv_kwargs))
 
 
 #---------------------------------------------------------------------#
@@ -342,6 +357,28 @@ def list_samples(dea_dir: str,
 
     # Return the part of each name between the prefix and the
     # extension, sorted.
-    return sorted(name[len(prefix):-4] for name in names
-                  if name.startswith(prefix)
-                  and name.endswith(".csv"))
+    #
+    # THE EXTENSION IS STRIPPED BY LENGTH, NOT BY A CONSTANT. This took
+    # the name up to its last four characters, which is '.csv' and is
+    # not '.parquet': against a directory written by a current run it
+    # would have returned every sample name with 'rque' still attached,
+    # and every lookup keyed on those names would have missed. A
+    # directory holding both formats is also possible while a cohort is
+    # half regenerated, so the names are de-duplicated.
+    out = set()
+
+    for name in names:
+
+        if not name.startswith(prefix):
+
+            continue
+
+        for ext in READ_EXTENSIONS:
+
+            if name.endswith(ext):
+
+                out.add(name[len(prefix):-len(ext)])
+
+                break
+
+    return sorted(out)

@@ -47,6 +47,9 @@ import sys
 # Import from third-party libraries.
 from distributed import LocalCluster, Client, as_completed
 import pandas as pd
+
+# Import from the package.
+from bulkdgd.ioutil.tableio import save_table
 import torch
 
 # Import from 'bulkdgd'.
@@ -779,12 +782,12 @@ def main(args: argparse.Namespace) -> None:
 
         # Set the path to the output file.
         output_path = \
-            os.path.join(wd, f"{output_dea_prefix}{sample_name}.csv")
+            os.path.join(wd, f"{output_dea_prefix}{sample_name}.parquet")
 
         # Try to write the data frame in the output file.
         try:
 
-            df_stats.to_csv(output_path,
+            save_table(df_stats, output_path,
                             sep = ",",
                             index = True,
                             header = True)
@@ -879,12 +882,12 @@ def main(args: argparse.Namespace) -> None:
                 # Set the path to the output file.
                 output_path = \
                     os.path.join(wd,
-                                 f"{output_gsea_prefix}{sample_name}.csv")
+                                 f"{output_gsea_prefix}{sample_name}.parquet")
 
                 # Try to write the data frame in the output file.
                 try:
 
-                    df_gsea_result.to_csv(output_path,
+                    save_table(df_gsea_result, output_path,
                                          sep = ",",
                                          index = True,
                                          header = True)
@@ -936,17 +939,17 @@ def main(args: argparse.Namespace) -> None:
         output_gsea_name = output_gsea_prefix.rstrip("_").rstrip(".")
 
         # Set the path to the output file.
-        output_gsea_file = os.path.join(wd, f"{output_gsea_name}.csv")
+        output_gsea_file = os.path.join(wd, f"{output_gsea_name}.parquet")
 
         # Try to write the data frame in the output file.
         try:
 
-            pd.concat(gsea_results,
-                     ignore_index = True).to_csv(\
-                        output_gsea_file,
-                        sep = ",",
-                        index = True,
-                        header = True)
+            save_table(pd.concat(gsea_results,
+                                 ignore_index = True),
+                       output_gsea_file,
+                       sep = ",",
+                       index = True,
+                       header = True)
 
         # If something went wrong
         except Exception as e:

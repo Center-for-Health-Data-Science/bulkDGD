@@ -43,6 +43,9 @@ from typing import Optional
 
 # Import from third-party libraries.
 import pandas as pd
+
+# Import from the package.
+from ..ioutil.tableio import save_table
 import requests as rq
 
 # Import from 'bulkdgd'.
@@ -643,7 +646,7 @@ def get_metadata(project_name: str,
             logger.info(infostr)
 
         # Write the data frame to the output file.
-        df_metadata.to_csv(f_metadata_path,
+        save_table(df_metadata, f_metadata_path,
                            sep = "\t",
                            compression = "gzip")
 

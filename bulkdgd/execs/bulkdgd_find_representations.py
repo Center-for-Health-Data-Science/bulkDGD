@@ -453,7 +453,7 @@ def main(args: argparse.Namespace) -> None:
     # Try to write the time data in the dedicated CSV file.
     try:
 
-        df_time.to_csv(output_time,
+        save_table(df_time, output_time,
                       sep = ",",
                       index = True,
                       header = True)

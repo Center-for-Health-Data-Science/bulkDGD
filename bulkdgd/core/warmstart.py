@@ -259,9 +259,21 @@ def fit_from_model_dir(model_dir,
 
     import os
 
-    reps = pd.read_csv(os.path.join(model_dir,
-                                    "representations_train.csv"),
-                       index_col = 0)
+    # WHICHEVER FORMAT IT IS IN. 'train.py' writes these as Parquet
+    # now; a tree built earlier holds the CSV. An exact hit wins, then
+    # Parquet, then text.
+    _stem = os.path.join(model_dir, "representations_train")
+
+    _path = next((f"{_stem}{e}" for e in (".parquet", ".pq", ".csv")
+                  if os.path.isfile(f"{_stem}{e}")), None)
+
+    if _path is None:
+        raise FileNotFoundError(
+            f"no 'representations_train.{{parquet,csv}}' in "
+            f"'{model_dir}'.")
+
+    reps = (pd.read_parquet(_path) if _path.endswith((".parquet", ".pq"))
+            else pd.read_csv(_path, index_col = 0))
 
     reps = reps[[c for c in reps.columns
                  if c.startswith("latent_dim_")]]

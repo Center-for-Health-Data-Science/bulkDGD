@@ -60,6 +60,9 @@ import zipfile
 
 # Import from third-party libraries.
 import pandas as pd
+
+# Import from the package.
+from ..ioutil.tableio import save_table
 import torch
 import yaml
 
@@ -1278,7 +1281,7 @@ class BulkDGDEnsemble:
             path = os.path.join(model_dir, name)
 
             # Write the data frame.
-            df.to_csv(path, sep = ",", index = True)
+            save_table(df, path, sep = ",", index = True)
 
             # Record the file.
             outputs[name.rsplit(".", 1)[0]] = path
@@ -1297,8 +1300,8 @@ class BulkDGDEnsemble:
         for dfs, stem in ((dfs_rep, "representations"),
                           (dfs_pred_means, "pred_means")):
 
-            write(dfs[0], f"{stem}_train.csv")
-            write(dfs[1], f"{stem}_test.csv")
+            write(dfs[0], f"{stem}_train.parquet")
+            write(dfs[1], f"{stem}_test.parquet")
 
         #-------------------------------------------------------------#
 
@@ -1441,7 +1444,7 @@ class BulkDGDEnsemble:
 
                 path = os.path.join(options["results_dir"], name_file)
 
-                df.to_csv(path, sep = ",", index = True)
+                save_table(df, path, sep = ",", index = True)
 
                 outputs[key] = path
 
@@ -1454,7 +1457,7 @@ class BulkDGDEnsemble:
                 path = os.path.join(options["results_dir"],
                                     self.PRED_R_VALUES_FILE)
 
-                df_pred_r_values.to_csv(path, sep = ",", index = True)
+                save_table(df_pred_r_values, path, sep = ",", index = True)
 
                 outputs["pred_r_values"] = path
 
@@ -1695,9 +1698,9 @@ class BulkDGDEnsemble:
                 #-----------------------------------------------------#
 
                 # Write the sample's statistics.
-                df_stats.to_csv(
+                save_table(df_stats, 
                     os.path.join(dea_dir_member,
-                                 f"{prefix}{sample}.csv"),
+                                 f"{prefix}{sample}.parquet"),
                     sep = ",",
                     index = True)
 
@@ -2099,7 +2102,7 @@ class BulkDGDEnsemble:
             # Write them.
             path = os.path.join(gsea_dir_member, self.E_SCORES_FILE)
 
-            df_e_scores_all.to_csv(path, sep = ",", index = False)
+            save_table(df_e_scores_all, path, sep = ",", index = False)
 
             #---------------------------------------------------------#
 

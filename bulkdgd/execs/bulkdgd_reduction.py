@@ -44,6 +44,9 @@ import sys
 import numpy as np
 import pandas as pd
 
+# Import from the package.
+from bulkdgd.ioutil.tableio import save_table
+
 # Import from 'bulkdgd'.
 from bulkdgd import defaults, ioutil, plotting
 from bulkdgd.analysis import reduction
@@ -194,7 +197,7 @@ def set_parser(dim_red_name: str) -> argparse.ArgumentParser:
     #-----------------------------------------------------------------#
     
     # Set the default value for the argument.
-    oa_default = f"{dim_red_name}.csv"
+    oa_default = f"{dim_red_name}.parquet"
 
     # Set a help message.
     oa_help = \
@@ -596,7 +599,7 @@ def main(args: argparse.Namespace,
     # Try to save the results of the dimensionality reduction.
     try:
 
-        df_dim_red.to_csv(output_analysis,
+        save_table(df_dim_red, output_analysis,
                           sep = ",",
                           index = True,
                           header = True)

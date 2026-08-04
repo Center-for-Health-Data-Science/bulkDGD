@@ -289,7 +289,7 @@ def main(args: argparse.Namespace) -> None:
     # to the output CSV file.
     try:
 
-        df_prob_rep.to_csv(output_prob_rep,
+        save_table(df_prob_rep, output_prob_rep,
                            sep = ",",
                            header = True,
                            index = True)
@@ -319,7 +319,7 @@ def main(args: argparse.Namespace) -> None:
     # to the output CSV file.
     try:
 
-        df_prob_comp.to_csv(output_prob_comp,
+        save_table(df_prob_comp, output_prob_comp,
                             sep = ",",
                             header = True,
                             index = True)

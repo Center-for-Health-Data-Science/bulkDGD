@@ -40,6 +40,9 @@ from typing import Optional
 # Import from third-party libraries.
 import pandas as pd
 
+# Import from the package.
+from .tableio import save_table
+
 # Import from 'bulkdgd'.
 from bulkdgd import _internals
 from bulkdgd import defaults
@@ -220,7 +223,7 @@ def save_samples(df: pd.DataFrame,
     """
 
     # Save the samples.
-    df.to_csv(csv_file,
+    save_table(df, csv_file,
               sep = sep,
               index = True,
               header = True)

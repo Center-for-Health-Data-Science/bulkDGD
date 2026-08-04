@@ -29,3 +29,4 @@ from .deaio import *
 from .decoutio import *
 from .repio import *
 from .samplesio import *
+from .tableio import *

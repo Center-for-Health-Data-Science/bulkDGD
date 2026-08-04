@@ -240,7 +240,7 @@ def main(args: argparse.Namespace) -> None:
     # Try to write out the data frame containing the genes' attributes.
     try:
 
-        genes_attributes.to_csv(output_attributes,
+        save_table(genes_attributes, output_attributes,
                                 sep = ",",
                                 index = False,
                                 header = True)

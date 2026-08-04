@@ -41,6 +41,9 @@ import sys
 
 # Import from third-party libraries.
 import pandas as pd
+
+# Import from the package.
+from bulkdgd.ioutil.tableio import save_table
 import torch
 
 # Import from 'bulkdgd'.
@@ -1045,7 +1048,7 @@ def main(args: argparse.Namespace) -> None:
     try:
 
         # Save the loss(es).
-        df_loss.to_csv(output_loss,
+        save_table(df_loss, output_loss,
                        sep = ",",
                        index = False,
                        header = True)
@@ -1075,7 +1078,7 @@ def main(args: argparse.Namespace) -> None:
         # dedicated CSV file.
         try:
 
-            df_metrics_train.to_csv(output_metrics_train,
+            save_table(df_metrics_train, output_metrics_train,
                                     sep = ",",
                                     index = False,
                                     header = True)
@@ -1102,7 +1105,7 @@ def main(args: argparse.Namespace) -> None:
         # dedicated CSV file.
         try:
 
-            df_metrics_test.to_csv(output_metrics_test,
+            save_table(df_metrics_test, output_metrics_test,
                                    sep = ",",
                                    index = False,
                                    header = True)
@@ -1130,7 +1133,7 @@ def main(args: argparse.Namespace) -> None:
     # Try to write the time data in the dedicated CSV file.
     try:
 
-        df_time.to_csv(output_time,
+        save_table(df_time, output_time,
                        sep = ",",
                        index = False,
                        header = True)
