@@ -39,6 +39,7 @@ __doc__ = \
 # Import from the standard library.
 import contextlib
 import copy
+import hashlib
 import logging as log
 import math
 import os
@@ -59,6 +60,7 @@ from bulkdgd import _internals, defaults
 from . import (
     dataclasses,
     decoders,
+    fineapi,
     latents,
     metrics,
     outputmodules,
@@ -156,7 +158,7 @@ def clip_grads(optimizer: torch.optim.Optimizer,
 #######################################################################
 
 
-class BulkDGD(nn.Module):
+class BulkDGD(fineapi.FineTuningMixin, nn.Module):
 
     """
     Class implementing the BulkDGD model.
@@ -2897,7 +2899,13 @@ class BulkDGD(nn.Module):
     def _draw_rep_init(self,
                        n_samples: int,
                        n_rep_per_comp: int,
-                       seed: Optional[int]) -> torch.Tensor:
+                       seed: Optional[int],
+                       samples_names: Optional[list[str]] = None,
+                       mode: str = "sample_keyed",
+                       index_file: Optional[str] = None,
+                       original_n_samples: Optional[int] = None,
+                       chunk_size: Optional[int] = None) -> \
+            torch.Tensor:
         """Draw the candidate representations for one seed.
 
         This is the initialization step of the 'two_opt' scheme, pulled
@@ -2905,48 +2913,369 @@ class BulkDGD(nn.Module):
         per seed and get, for each, exactly what a single-seed run of
         'two_opt' would have started from.
 
-        THE ORDER OF THE DRAWS IS THE CONTRACT. The candidates come from
-        'n_components' successive calls, each consuming the global
-        generator, so a scheme that seeds once and then draws in this
-        same order reproduces a standalone run bit for bit, and one that
-        interleaves seeds or reorders the components does not. Nothing
-        here may be reordered for tidiness.
+        ``sample_keyed`` is the default.  It derives an independent
+        random stream from the configured seed and the sample's ID, so
+        a sample starts from the same candidates regardless of its row,
+        its neighbours, or how the input is chunked.
+
+        ``legacy_positional`` is the historical implementation.  Its
+        single global stream is consumed component by component, and a
+        sample's candidates therefore depend on the number and order of
+        samples in the current chunk.  Published configurations request
+        it explicitly so their representations remain reproducible.
+
+        ``legacy_indexed`` reconstructs those historical candidates
+        from an external table mapping sample IDs to their zero-based
+        absolute row positions in the old input. Together with the old
+        total sample count and chunk size, this identifies both the
+        sample's position inside its old chunk and the number of draws
+        the chunk consumed. The current input can then be reordered or
+        subsetted without changing the reconstructed starting points.
+
+        Parameters
+        ----------
+        n_samples : :class:`int`
+            The number of samples to initialize.
+
+        n_rep_per_comp : :class:`int`
+            The number of candidate representations to draw from each
+            mixture component for each sample.
+
+        seed : :class:`int`, optional
+            The initialization seed. It is required by
+            ``sample_keyed`` and ``legacy_indexed``.
+
+        samples_names : :class:`list` of :class:`str`, optional
+            The sample names. They are required by ``sample_keyed`` and
+            ``legacy_indexed``.
+
+        mode : :class:`str`
+            The initialization mode.
+
+        index_file : :class:`str`, optional
+            The CSV file mapping sample names to historical absolute
+            positions for ``legacy_indexed``.
+
+        original_n_samples : :class:`int`, optional
+            The number of samples in the historical input for
+            ``legacy_indexed``.
+
+        chunk_size : :class:`int`, optional
+            The outer chunk size used by the historical run for
+            ``legacy_indexed``.
+
+        Returns
+        -------
+        rep_init : :class:`torch.Tensor`
+            The initialized candidate representations.
         """
+
+        modes = {"sample_keyed", "legacy_positional", "legacy_indexed"}
+
+        if mode not in modes:
+
+            raise ValueError(
+                f"Unsupported representation initialization mode "
+                f"'{mode}'. The supported modes are: "
+                f"{', '.join(sorted(modes))}.")
 
         n_components = self.latent.n_components
 
         n_dim = self.latent.dim
 
-        component_samples = []
+        #-------------------------------------------------------------#
 
-        # 'GaussianMixture.sample' draws on the GLOBAL generator and
-        # takes no generator of its own, so the global one is seeded and
-        # its state put back afterwards, exactly as 'two_opt' does.
-        with contextlib.ExitStack() as stack:
+        def draw_legacy_chunk(chunk_n_samples: int) -> torch.Tensor:
+            """Run the historical stream for one complete old chunk."""
 
-            if seed is not None:
+            component_samples = []
 
-                stack.enter_context(
-                    torch.random.fork_rng(devices = []))
+            with contextlib.ExitStack() as stack:
 
-                torch.manual_seed(int(seed))
+                if seed is not None:
 
-            for comp_idx in range(n_components):
+                    stack.enter_context(
+                        torch.random.fork_rng(devices = []))
 
-                samples_comp, _ = self.latent.sample(
-                    n_samples = n_samples * n_rep_per_comp,
-                    component = comp_idx)
+                    torch.manual_seed(int(seed))
 
-                component_samples.append(samples_comp)
+                for comp_idx in range(n_components):
 
-        component_samples = torch.stack(component_samples, dim = 0)
+                    samples_comp, _ = self.latent.sample(
+                        n_samples = chunk_n_samples * n_rep_per_comp,
+                        component = comp_idx)
 
-        component_samples = component_samples.view(n_components,
-                                                   n_samples,
-                                                   n_rep_per_comp,
-                                                   n_dim)
+                    component_samples.append(samples_comp)
 
-        component_samples = component_samples.permute(1, 2, 0, 3)
+            component_samples = torch.stack(component_samples, dim = 0)
+
+            component_samples = component_samples.view(
+                n_components,
+                chunk_n_samples,
+                n_rep_per_comp,
+                n_dim)
+
+            return component_samples.permute(1, 2, 0, 3)
+
+        #-------------------------------------------------------------#
+
+        # The historical path is kept byte-for-byte in its draw order.
+        if mode == "legacy_positional":
+
+            return draw_legacy_chunk(n_samples).reshape(
+                n_samples * n_rep_per_comp * n_components, n_dim)
+
+        #-------------------------------------------------------------#
+
+        if mode == "legacy_indexed":
+
+            if seed is None:
+
+                raise ValueError(
+                    "The 'legacy_indexed' representation "
+                    "initialization mode requires "
+                    "'scheme_options.initialization.seed'.")
+
+            if samples_names is None:
+
+                raise ValueError(
+                    "The 'legacy_indexed' representation "
+                    "initialization mode requires the samples' IDs.")
+
+            if index_file is None:
+
+                raise ValueError(
+                    "The 'legacy_indexed' representation "
+                    "initialization mode requires 'index_file'.")
+
+            if original_n_samples is None or \
+                    int(original_n_samples) <= 0:
+
+                raise ValueError(
+                    "The 'legacy_indexed' representation "
+                    "initialization mode requires a positive "
+                    "'original_n_samples'.")
+
+            if chunk_size is None or int(chunk_size) <= 0:
+
+                raise ValueError(
+                    "The 'legacy_indexed' representation "
+                    "initialization mode requires a positive "
+                    "'chunk_size'.")
+
+            original_n_samples = int(original_n_samples)
+
+            chunk_size = int(chunk_size)
+
+            samples_names = \
+                [str(sample_id) for sample_id in samples_names]
+
+            if len(samples_names) != n_samples:
+
+                raise ValueError(
+                    f"The indexed legacy initializer received "
+                    f"{len(samples_names)} sample IDs for {n_samples} "
+                    "samples.")
+
+            if len(set(samples_names)) != len(samples_names):
+
+                raise ValueError(
+                    "Sample IDs must be unique after conversion to "
+                    "strings when 'legacy_indexed' initialization is "
+                    "used.")
+
+            df_positions = pd.read_csv(index_file,
+                                       sep = ",",
+                                       index_col = 0)
+
+            if df_positions.shape[1] != 1:
+
+                raise ValueError(
+                    f"The legacy index file '{index_file}' must have "
+                    "exactly one data column; found "
+                    f"{df_positions.shape[1]}.")
+
+            if df_positions.index.has_duplicates:
+
+                raise ValueError(
+                    f"The legacy index file '{index_file}' contains "
+                    "duplicate sample IDs.")
+
+            df_positions.index = df_positions.index.map(str)
+
+            missing = \
+                sorted(set(samples_names) - set(df_positions.index))
+
+            if missing:
+
+                raise ValueError(
+                    f"The legacy index file '{index_file}' has no "
+                    "position for the following sample IDs: "
+                    f"{missing}.")
+
+            positions_raw = df_positions.iloc[:, 0]
+
+            positions_numeric = pd.to_numeric(positions_raw,
+                                              errors = "coerce")
+
+            if positions_numeric.isna().any():
+
+                raise ValueError(
+                    f"Every position in the legacy index file "
+                    f"'{index_file}' must be an integer.")
+
+            positions_float = \
+                positions_numeric.to_numpy(dtype = np.float64)
+
+            if not np.equal(positions_float,
+                            np.floor(positions_float)).all():
+
+                raise ValueError(
+                    f"Every position in the legacy index file "
+                    f"'{index_file}' must be an integer.")
+
+            positions = \
+                {sample_id : int(positions_numeric.loc[sample_id])
+                 for sample_id in samples_names}
+
+            if len(set(positions.values())) != len(positions):
+
+                raise ValueError(
+                    "The requested samples map to duplicate historical "
+                    "positions in the legacy index file.")
+
+            invalid = \
+                {sample_id : position
+                 for sample_id, position in positions.items()
+                 if position < 0 or position >= original_n_samples}
+
+            if invalid:
+
+                raise ValueError(
+                    f"Legacy positions must be in [0, "
+                    f"{original_n_samples - 1}]; got {invalid}.")
+
+            # Every full historical chunk has the same candidate tensor:
+            # the old code reset the same seed at the start of every
+            # call. Only the last, shorter chunk needs a second cached
+            # draw.
+            chunks_by_length = {}
+
+            selected = []
+
+            for sample_id in samples_names:
+
+                absolute_position = positions[sample_id]
+
+                chunk_start = \
+                    (absolute_position // chunk_size) * chunk_size
+
+                old_chunk_n_samples = \
+                    min(chunk_size, original_n_samples - chunk_start)
+
+                position_in_chunk = absolute_position - chunk_start
+
+                if old_chunk_n_samples not in chunks_by_length:
+
+                    chunks_by_length[old_chunk_n_samples] = \
+                        draw_legacy_chunk(old_chunk_n_samples)
+
+                selected.append(
+                    chunks_by_length[old_chunk_n_samples][
+                        position_in_chunk])
+
+            return torch.stack(selected, dim = 0).reshape(
+                n_samples * n_rep_per_comp * n_components, n_dim)
+
+        #-------------------------------------------------------------#
+
+        # A keyed stream cannot be defined without the key's seed or
+        # sample IDs.  Failing here is safer than silently returning to
+        # positional behaviour in a mode whose name promises otherwise.
+        if seed is None:
+
+            raise ValueError(
+                "The 'sample_keyed' representation initialization mode "
+                "requires 'scheme_options.initialization.seed'.")
+
+        if samples_names is None:
+
+            raise ValueError(
+                "The 'sample_keyed' representation initialization mode "
+                "requires the samples' IDs.")
+
+        samples_names = [str(sample_id) for sample_id in samples_names]
+
+        if len(samples_names) != n_samples:
+
+            raise ValueError(
+                "The sample-keyed initializer received "
+                f"{len(samples_names)} sample IDs for {n_samples} "
+                "samples.")
+
+        if len(set(samples_names)) != len(samples_names):
+
+            raise ValueError(
+                "Sample IDs must be unique after conversion to strings "
+                "when 'sample_keyed' initialization is used.")
+
+        # One CPU generator call per sample is fast enough to remain a
+        # rounding error beside the optimization, and makes the stream
+        # independent of row, chunk and every other sample. A
+        # cryptographic digest is used because Python's built-in hash
+        # is deliberately randomized between processes.
+        standard_normal = []
+
+        for sample_id in samples_names:
+
+            payload = \
+                f"{int(seed)}\0{sample_id}".encode("utf-8")
+
+            digest = hashlib.blake2b(
+                payload,
+                digest_size = 8,
+                person = b"BulkDGD.init.v1").digest()
+
+            sample_seed = \
+                int.from_bytes(digest,
+                               byteorder = "big",
+                               signed = False) & ((1 << 63) - 1)
+
+            generator = torch.Generator(device = "cpu")
+
+            generator.manual_seed(sample_seed)
+
+            standard_normal.append(
+                torch.randn((n_rep_per_comp, n_components, n_dim),
+                            generator = generator,
+                            device = "cpu",
+                            dtype = self.latent.means.dtype))
+
+        standard_normal = torch.stack(standard_normal, dim = 0)
+
+        # Transform the standard normals by every component's covariance
+        # in one batched operation.  This is the same Gaussian law as
+        # 'GaussianMixture.sample', without its single global RNG
+        # stream.
+        means = self.latent.means
+
+        components = torch.arange(n_components,
+                                  dtype = torch.long,
+                                  device = means.device)
+
+        covariances = \
+            self.latent._build_covariances_for_sampling(
+                components, n_components)
+
+        scale_tril = torch.linalg.cholesky(covariances)
+
+        standard_normal = standard_normal.to(device = means.device)
+
+        component_samples = \
+            means.view(1, 1, n_components, n_dim) + \
+            torch.einsum("srcj,cij->srci",
+                         standard_normal,
+                         scale_tril)
 
         return component_samples.reshape(
             n_samples * n_rep_per_comp * n_components, n_dim)
@@ -3147,71 +3476,29 @@ class BulkDGD(nn.Module):
             # (median 5.46 sigma, against 5.59 for the draw). The draw is
             # already well matched to them.
             #
-            # It is NOT reproducible without a seed, and by default there
-            # is none: two runs of 'find_representations' on the same
-            # samples with the same model start from different points and
-            # do not end at the same representations.
+            # A seeded sample-keyed draw is the default. Historical
+            # positional drawing and indexed reconstruction of it are
+            # available as explicit modes in the initialization block.
             init_options = \
                 config["scheme_options"].get("initialization", {})
 
             seed = init_options.get("seed")
 
+            mode = init_options.get("mode", "sample_keyed")
+
             #---------------------------------------------------------#
 
-            # Initialize a list to store the samples from each
-            # component.
-            component_samples = []
-
-            # 'GaussianMixture.sample' draws on the GLOBAL generator and
-            # takes no generator of its own, so seeding one and handing
-            # it over does nothing at all for the default method - which
-            # is how a seeded run came back with different
-            # representations the first time this was tried.
-            #
-            # Seed the global generator instead, and put back the state
-            # it had, so that asking for a reproducible initialization
-            # does not quietly reseed the rest of the program.
-            with contextlib.ExitStack() as stack:
-
-                if seed is not None:
-
-                    stack.enter_context(
-                        torch.random.fork_rng(devices = []))
-
-                    torch.manual_seed(int(seed))
-
-                # For each component
-                for comp_idx in range(n_components):
-
-                    # Draw the candidates from the component.
-                    samples_comp, _ = self.latent.sample(
-                        n_samples = n_samples * n_rep_per_comp,
-                        component = comp_idx)
-
-                    component_samples.append(samples_comp)
-
-            # Stack all component samples: shape (n_components,
-            # n_samples * n_rep_per_comp, n_dim).
-            component_samples = torch.stack(component_samples,
-                                            dim = 0)
-            
-            # Reshape to (n_components, n_samples, n_rep_per_comp,
-            # n_dim).
-            component_samples = component_samples.view(n_components,
-                                                       n_samples,
-                                                       n_rep_per_comp,
-                                                       n_dim)
-            
-            # Permute to (n_samples, n_rep_per_comp, n_components,
-            # n_dim).
-            component_samples = component_samples.permute(1, 2, 0, 3)
-            
-            # Flatten to final shape (n_samples * n_rep_per_comp * 
-            # n_components, n_dim).
             rep_init = \
-                component_samples.reshape(
-                    n_samples * n_rep_per_comp * n_components,
-                    n_dim)
+                self._draw_rep_init(
+                    n_samples = n_samples,
+                    n_rep_per_comp = n_rep_per_comp,
+                    seed = seed,
+                    samples_names = dataset.samples,
+                    mode = mode,
+                    index_file = init_options.get("index_file"),
+                    original_n_samples = \
+                        init_options.get("original_n_samples"),
+                    chunk_size = init_options.get("chunk_size"))
 
         #-------------------------------------------------------------#
 
@@ -9233,4 +9520,3 @@ class BulkDGD(nn.Module):
                     df_other_data_train = df_other_data_train,
                     df_other_data_test = df_other_data_test,
                     genes_names = genes_columns)
-

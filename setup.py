@@ -109,6 +109,7 @@ package_data = \
      "bulkdgd" : \
         [# Configuration files
          "configs/dimensionality_reduction/*yaml",
+         "configs/fine_tuning/*.yaml",
          "configs/genes/*.yaml",
          "configs/model/*.yaml",
          # One directory per member of the shipped ensemble, holding

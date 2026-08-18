@@ -1,12 +1,11 @@
 # Configuration file specifying the options to get the representations
 # with two rounds of optimization.
 #
-# THESE ARE THE OPTIONS THE PUBLISHED RESULTS WERE PRODUCED WITH. Every
-# set of representations reported for the ensemble - the GTEx test
-# split, TCGA, the SRA cohorts, every disease - was found with this
-# scheme and these numbers; what changed between cohorts was the
-# contamination (see 'scheme_options' below) and nothing else. It is
-# therefore the configuration loaded when none is given.
+# The optimization scheme and numerical options below are those used
+# for the published results. New runs use sample-keyed initialization
+# so that a sample is invariant to its row, neighbours and chunk. A
+# historical run must say 'mode: legacy_positional' explicitly; the
+# paper's archived run configurations do so.
 #
 # 'two_opt_noisy.yaml' is this file plus the perturbation training
 # applies to its own representations. It is a variant and not the
@@ -239,6 +238,11 @@ scheme_options:
   # Set how the candidate representations are placed.
   initialization:
 
+    # Derive a separate random stream from the seed and sample ID.
+    # This is the default for new configurations and makes the result
+    # independent of input ordering, subsetting and chunking.
+    mode: sample_keyed
+
     # The seed of the draw that places the candidates.
     #
     # Type: int.
@@ -251,10 +255,9 @@ scheme_options:
     # same model therefore start from different points and do not end
     # at the same representations.
     #
-    # Seven is the seed the published representations were found with.
-    # Nothing distinguishes it from any other; it is fixed so that the
-    # numbers the paper reports can be reproduced, and so that two runs
-    # meant to differ in one thing differ in that one thing.
+    # Nothing distinguishes seven from any other seed; it is fixed so
+    # that two runs meant to differ in one thing differ in that one
+    # thing.
     seed: 7
 
   #-------------------------------------------------------------------#

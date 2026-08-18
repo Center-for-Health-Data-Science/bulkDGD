@@ -179,14 +179,18 @@ scheme_options:
   # Set how the candidate representations are placed.
   initialization:
 
+    # Match the default's deterministic per-sample initialization.
+    mode: sample_keyed
+
     # The seed of the draw that places the candidates.
     #
     # Type: int.
     #
-    # The default's seed. The candidates therefore start in exactly the
-    # same places they start in a run of the default, which is what
-    # makes the two runs comparable at all - the noise is then the only
-    # source of difference between them, rather than one of two.
+    # The default's seed and mode. The candidates therefore start in
+    # exactly the same places they start in a run of the default, which
+    # is what makes the two runs comparable at all - the noise is then
+    # the only source of difference between them, rather than one of
+    # two.
     #
     # It does NOT seed the noise itself, which is drawn from the global
     # generator as the optimization runs; seed that through

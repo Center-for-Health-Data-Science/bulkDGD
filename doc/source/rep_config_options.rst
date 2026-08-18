@@ -125,7 +125,43 @@ The options that can be specified are described below.
 
 * ``"scheme_options"`` is a dictionary of options specific to the optimization scheme. The options vary depending on the scheme type and the latent space type.
 
-   * For the ``two_opt`` scheme with the legacy GMM (``"lgmm"``):
+  * ``"initialization"`` controls how candidate representations are
+    drawn for a TorchGMM latent space. It contains an integer ``"seed"``
+    (or a list of integer ``"seeds"`` for ``two_opt_multiseed``) and a
+    ``"mode"``:
+
+    * ``"sample_keyed"`` is the default for new runs. BulkDGD derives
+      an independent deterministic stream from the configured seed and
+      the exact sample ID. The same sample therefore receives
+      bit-for-bit identical initial candidates, representations,
+      decoder outputs and DEA results when it is reordered, subsetted,
+      placed beside different samples, or processed in a different
+      chunk.
+
+    * ``"legacy_positional"`` reproduces the historical behaviour. One
+      stream is consumed in input order, so the candidate assigned to a
+      sample depends on its position and on the size of the input chunk.
+      Published-paper configurations must request this mode explicitly.
+
+    * ``"legacy_indexed"`` reconstructs historical positional
+      candidates while allowing the current counts table to be reordered
+      or subsetted. In addition to the seed, it requires
+      ``"index_file"``,
+      ``"original_n_samples"`` and ``"chunk_size"``. ``"index_file"``
+      is a one-column CSV whose row names are sample IDs and whose
+      integer values are their zero-based absolute positions in the
+      historical input::
+
+        sample_id,position
+        SRR8261581,0
+        SRR8261574,1
+
+      ``"chunk_size"`` is the size of the historical outer input chunk,
+      not ``data_loader_options.batch_size``. The total sample count is
+      needed because the last historical chunk can be shorter. Sample
+      IDs and requested historical positions must both be unique.
+
+  * For the ``two_opt`` scheme with the legacy GMM (``"lgmm"``):
 
       * ``"loss_reduction_type"`` is the reduction method to use for the loss function. This can be:
 
@@ -223,4 +259,7 @@ The options that can be specified are described below.
             * ``"gain"`` is a final multiplier on the noise. This is a non-negative float that defaults to ``1.0``.
 
             Each round is annealed over its OWN epochs and is configured separately: the first round explores from many candidates and the second refines the one that won, so they need not be perturbed by the same amount.
-      * ``"optimization_2"`` is a dictionary of options for the second optimization round. It has the same structure as ``"optimization_1"`` but with ``"epochs"`` defaulting to ``50``.
+      * ``"optimization_2"`` is a dictionary of options for the second
+        optimization round. It has the same structure as
+        ``"optimization_1"`` but with ``"epochs"`` defaulting to
+        ``50``.

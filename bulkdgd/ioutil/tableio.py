@@ -91,7 +91,8 @@ def save_table(df,
                file_path,
                sep = ",",
                index = True,
-               header = True):
+               header = True,
+               compression = "infer"):
 
     """Write a table, as Parquet or as text, by the path's extension.
 
@@ -114,6 +115,11 @@ def save_table(df,
     header : :class:`bool`, ``True``
         Whether to write the column names, for the text case only.
         Parquet always carries them, since they are part of the schema.
+
+    compression : :class:`str`, ``"infer"``
+        How to compress the text file. ``"infer"`` takes it from
+        the path's extension, so a name ending in '.gz' is gzipped.
+        Parquet carries its own compression and ignores this.
     """
 
     if is_parquet(file_path):
@@ -133,7 +139,8 @@ def save_table(df,
         df.to_csv(file_path,
                   sep = sep,
                   index = index,
-                  header = header)
+                  header = header,
+                  compression = compression)
 
 
 #---------------------------------------------------------------------#

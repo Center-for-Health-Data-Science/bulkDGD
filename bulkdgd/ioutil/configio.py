@@ -46,7 +46,8 @@ from bulkdgd import defaults
 from bulkdgd.core._util import (
     parse_config_model,
     parse_config_train,
-    parse_config_rep)
+    parse_config_rep,
+    parse_config_fine_tune)
 from bulkdgd.plotting._util import parse_config_plot
 
 
@@ -66,6 +67,7 @@ type2parsefunc = \
    {"model" : parse_config_model,
     "training" : parse_config_train,
     "representations" : parse_config_rep,
+    "fine_tuning" : parse_config_fine_tune,
     "plotting" : parse_config_plot}
 
 
@@ -120,7 +122,8 @@ def _load_config(config_file: str,
     # If the configuration type is "model", "representations",
     # "training", or "plotting"
     if config_type in \
-        ["model", "representations", "training", "plotting"]:
+        ["model", "representations", "training", "fine_tuning",
+         "plotting"]:
 
         # Parse and check the configuration.
         if config_type == "model":
@@ -227,6 +230,39 @@ def load_config_rep(config_file: Optional[str]) -> dict[str, object]:
     # Load and check the configuration.
     return _load_config(config_file = config_file,
                         config_type = "representations")
+
+
+def load_config_fine_tune(
+        config_file: Optional[str],
+        fine_tuning_scheme: str = "add_gmm_components") -> \
+            dict[str, object]:
+    """Load a fine-tuning configuration from YAML.
+
+    Parameters
+    ----------
+    config_file : :class:`str`, optional
+        The YAML file.  If none is given, load the shipped
+        configuration for ``fine_tuning_scheme``.
+
+    fine_tuning_scheme : :class:`str`
+        The scheme whose shipped configuration is selected when no
+        file is given.
+
+    Returns
+    -------
+    config : :class:`dict`
+        The validated fine-tuning configuration.
+    """
+
+    # Select the shipped configuration for the requested scheme.
+    if config_file is None:
+        config_file = \
+            os.path.join(defaults.CONFIG_DIRS["fine_tuning"],
+                         fine_tuning_scheme + ".yaml")
+
+    # Load and validate the configuration.
+    return _load_config(config_file = config_file,
+                        config_type = "fine_tuning")
 
 
 def load_config_train(config_file: Optional[str]) -> dict[str, object]:

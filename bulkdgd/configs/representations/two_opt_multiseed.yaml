@@ -146,6 +146,11 @@ scheme_options:
   # Set how the candidate representations are placed.
   initialization:
 
+    # Every seed is independently keyed by sample ID. Reordering,
+    # subsetting or rechunking the input therefore cannot change a
+    # sample's candidates for any seed.
+    mode: sample_keyed
+
     # The seeds to run, one representation per sample coming back from
     # each.
     #

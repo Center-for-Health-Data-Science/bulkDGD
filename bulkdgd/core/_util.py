@@ -899,6 +899,17 @@ def parse_config_train(
     return config_validated, errors, warnings
 
 
+def parse_config_fine_tune(
+        config: Optional[dict[str, object]]) -> \
+            tuple[dict[str, object], list[str], list[str]]:
+    """Validate a fine-tuning configuration strictly."""
+
+    # Import here to avoid another module-level dependency.
+    from . import fineconfig
+
+    return fineconfig.parse_config(config = config)
+
+
 def parse_config_rep(config: Optional[dict[str, object]]) -> \
         tuple[dict[str, object],
               list[str],
@@ -948,6 +959,160 @@ def parse_config_rep(config: Optional[dict[str, object]]) -> \
 
     # Add the validation warnings to the list of warnings.
     warnings.extend(warnings_validation)
+
+    #-----------------------------------------------------------------#
+
+    # Validate the initialization contract separately.  This block has
+    # mode-dependent required fields, and ``two_opt_multiseed`` uses a
+    # list of seeds where ``two_opt`` uses one.  Keeping those checks
+    # here makes the resulting errors explicit instead of letting a
+    # malformed configuration fail later while representations are
+    # already being computed.
+    if config_validated.get("latent_type") == "tgmm":
+
+        scheme_options = config_validated.setdefault(
+            "scheme_options", {})
+
+        initialization = scheme_options.get("initialization", {})
+
+        if not isinstance(initialization, dict):
+
+            errors.append(
+                "scheme_options.initialization: must be a dictionary.")
+
+        else:
+
+            initialization = copy.deepcopy(initialization)
+
+            allowed = {
+                "mode", "seed", "seeds", "index_file",
+                "original_n_samples", "chunk_size"}
+
+            unknown = sorted(set(initialization) - allowed)
+
+            if unknown:
+
+                errors.append(
+                    "scheme_options.initialization: unsupported "
+                    f"option(s): {', '.join(unknown)}.")
+
+            if "mode" not in initialization:
+
+                initialization["mode"] = "sample_keyed"
+
+                warnings.append(
+                    "scheme_options.initialization.mode: no 'mode' "
+                    "found. The default value 'sample_keyed' will be "
+                    "used.")
+
+            mode = initialization.get("mode")
+
+            modes = {
+                "sample_keyed", "legacy_positional", "legacy_indexed"}
+
+            if mode not in modes:
+
+                errors.append(
+                    "scheme_options.initialization.mode: 'mode' must "
+                    "be one of: legacy_indexed, legacy_positional, "
+                    "sample_keyed.")
+
+            scheme_type = config_validated.get("scheme_type")
+
+            if scheme_type == "two_opt_multiseed":
+
+                seeds = initialization.get("seeds")
+
+                if not isinstance(seeds, (list, tuple)) or not seeds:
+
+                    errors.append(
+                        "scheme_options.initialization.seeds: "
+                        "'two_opt_multiseed' requires a non-empty list "
+                        "of integer seeds.")
+
+                elif any(type(seed) is not int for seed in seeds):
+
+                    errors.append(
+                        "scheme_options.initialization.seeds: every "
+                        "seed must be an integer.")
+
+                elif len(set(seeds)) != len(seeds):
+
+                    errors.append(
+                        "scheme_options.initialization.seeds: seeds "
+                        "must be distinct.")
+
+                else:
+
+                    initialization["seeds"] = list(seeds)
+
+                if "seed" in initialization:
+
+                    errors.append(
+                        "scheme_options.initialization.seed: use "
+                        "'seeds' with 'two_opt_multiseed', not 'seed'.")
+
+            else:
+
+                seed = initialization.get("seed")
+
+                if mode in {"sample_keyed", "legacy_indexed"} and \
+                        type(seed) is not int:
+
+                    errors.append(
+                        "scheme_options.initialization.seed: "
+                        f"'{mode}' requires one integer seed.")
+
+                elif seed is not None and type(seed) is not int:
+
+                    errors.append(
+                        "scheme_options.initialization.seed: 'seed' "
+                        "must be an integer when provided.")
+
+                if "seeds" in initialization:
+
+                    errors.append(
+                        "scheme_options.initialization.seeds: use "
+                        "'seed' with 'two_opt', not 'seeds'.")
+
+            indexed_options = {
+                "index_file", "original_n_samples", "chunk_size"}
+
+            if mode == "legacy_indexed":
+
+                index_file = initialization.get("index_file")
+
+                if not isinstance(index_file, str) or not index_file:
+
+                    errors.append(
+                        "scheme_options.initialization.index_file: "
+                        "'legacy_indexed' requires a non-empty path.")
+
+                for option in ("original_n_samples", "chunk_size"):
+
+                    value = initialization.get(option)
+
+                    if type(value) is not int or value <= 0:
+
+                        errors.append(
+                            f"scheme_options.initialization.{option}: "
+                            "'legacy_indexed' requires a positive "
+                            "integer.")
+
+            else:
+
+                unexpected = sorted(
+                    option for option in indexed_options
+                    if option in initialization)
+
+                if unexpected:
+
+                    errors.append(
+                        "scheme_options.initialization: "
+                        f"{', '.join(unexpected)} may only be used "
+                        "with mode 'legacy_indexed'.")
+
+            scheme_options["initialization"] = initialization
 
     #-----------------------------------------------------------------#
 

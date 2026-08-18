@@ -26,6 +26,7 @@
 # Import everything from the modules.
 from .dataclasses import *
 from .decoders import *
+from .finetuning import *
 from .latents import *
 from .metrics import *
 from .model import *

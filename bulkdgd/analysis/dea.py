@@ -59,14 +59,6 @@ __doc__ = \
        enumerating a grid, and it needs neither ``resolution`` nor
        ``max_elements`` nor a GPU.
 
-       ``get_statistics`` and ``perform_dea`` additionally emit
-       ``is_eligible_down``, which says whether a gene COULD have been
-       called down at all. A quarter of them cannot: the down
-       direction is bounded by zero counts, so a gene whose mass at
-       zero is above the sample's rejection threshold can never reach
-       it at any effect size. Absence from the down-calls was never
-       evidence of no change, and now it is possible to tell which is
-       which.
     """
 
 
@@ -1020,81 +1012,6 @@ def _compute_p_values_equal_tail(obs_counts: np.ndarray,
     return np.clip(p_values, 0.0, 1.0)
 
 
-def _compute_direction_eligibility(pred_means: np.ndarray,
-                                   r_values: Optional[np.ndarray],
-                                   p_threshold: float,
-                                   mid_p: bool = True) -> np.ndarray:
-    """Whether each gene could be called DOWN at all.
-
-    The down direction is bounded and the up direction is not. No count
-    is lower than zero, so the whole of a gene's down tail is the mass
-    at zero, and if that mass is above the threshold the gene CANNOT BE
-    CALLED DOWN AT ANY EFFECT SIZE WHATSOEVER. It is not that the gene
-    was tested and found unchanged; it is that the test could not have
-    come out the other way.
-
-    On the model of choice this is a QUARTER OF THE GENE UNIVERSE -
-    25.3% per sample, median - and nothing in the output said so. Any
-    argument that reads a gene's ABSENCE from the down-calls as evidence
-    - a marker of the normal tissue that "did not come down" - is
-    conditioning on something it never measured, and roughly a quarter
-    of the time the conditioning is the whole answer.
-
-    The up direction is not checked. It has no ceiling: a count can
-    always be large enough.
-
-    Parameters
-    ----------
-    pred_means : :class:`numpy.ndarray`
-        A one-dimensional array containing the predicted scaled mean
-        counts for the genes.
-
-    r_values : :class:`numpy.ndarray`, optional
-        A one-dimensional array containing the r-values for the genes.
-
-    p_threshold : :class:`float`
-        The p-value a gene has to be able to reach. This is the
-        sample's Benjamini-Hochberg critical value - the largest
-        p-value that was rejected - and NOT alpha, because what a gene
-        has to clear is the bar the multiple-testing correction
-        actually set for this sample.
-
-    mid_p : :class:`bool`, ``True``
-        Whether the mid-p correction is in use, which has to match the
-        one used for the p-values themselves.
-
-    Returns
-    -------
-    eligible_down : :class:`numpy.ndarray`
-        A one-dimensional boolean array, ``True`` where the gene could
-        have been called down.
-    """
-
-    zeros = np.zeros_like(pred_means)
-
-    if r_values is not None:
-
-        probs = r_values / (r_values + pred_means)
-
-        mass_at_zero = nbinom.pmf(zeros, r_values, probs)
-
-    else:
-
-        mass_at_zero = poisson.pmf(zeros, pred_means)
-
-    #-----------------------------------------------------------------#
-
-    # The best a gene can do downwards, which is the p-value it would
-    # get if it were observed at zero.
-    lower = mass_at_zero
-
-    if mid_p:
-        lower = lower - 0.5 * mass_at_zero
-
-    best_possible = np.clip(2.0 * lower, 0.0, 1.0)
-
-    return best_possible < p_threshold
-
 
 ########################## PUBLIC FUNCTIONS ###########################
 
@@ -1945,7 +1862,6 @@ def get_statistics(obs_counts: pd.Series,
     p_values = None
     q_values = None
     log2_fold_changes = None
-    series_eligible_down = None
 
     #-----------------------------------------------------------------#
 
@@ -2015,39 +1931,6 @@ def get_statistics(obs_counts: pd.Series,
                          alpha = alpha,
                          method = method)
 
-        #-------------------------------------------------------------#
-
-        # Say, for each gene, whether it could have been called DOWN at
-        # all - which a quarter of them cannot, and which nothing in
-        # the output used to say. See
-        # '_compute_direction_eligibility'.
-        rejected = q_values.values < alpha
-
-        # The bar a gene had to clear is the largest p-value that was
-        # rejected, and not alpha. If nothing was rejected, it is the
-        # bar the most significant gene would have had to clear.
-        p_crit = \
-            p_values.values[rejected].max() if rejected.any() \
-            else alpha / len(p_values)
-
-        scaled_means = \
-            pred_means.values \
-            * _get_scaling_factor(obs_counts = obs_counts.values,
-                                  scaling_factor = scaling_factor)
-
-        eligible_down = \
-            _compute_direction_eligibility(
-                pred_means = scaled_means,
-                r_values = \
-                    r_values.values if r_values is not None else None,
-                p_threshold = p_crit,
-                mid_p = mid_p)
-
-        series_eligible_down = pd.Series(eligible_down,
-                                         index = q_values.index)
-
-        series_eligible_down.name = "is_eligible_down"
-
     #-----------------------------------------------------------------#
 
     # If the user requested the calculation of fold changes
@@ -2065,8 +1948,7 @@ def get_statistics(obs_counts: pd.Series,
     # Get the results for the statistics that were computed.
     stats_results = \
         [stat if stat is not None else pd.Series()
-         for stat in (p_values, q_values, log2_fold_changes,
-                      series_eligible_down)]
+         for stat in (p_values, q_values, log2_fold_changes)]
 
     #-----------------------------------------------------------------#
 
